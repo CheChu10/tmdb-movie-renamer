@@ -95,8 +95,8 @@ Este script fue diseñado y **probado específicamente con Jellyfin**, asegurand
 ## Instalación
 
 ```bash
-git clone https://github.com/<tu-usuario>/<tu-repo>.git
-cd <tu-repo>
+git clone https://github.com/CheChu10/tmdb-movie-renamer.git
+cd tmdb-movie-renamer
 
 # Entorno virtual (opcional pero recomendado)
 python -m venv .venv
@@ -364,8 +364,8 @@ This tool was **built and tested under Jellyfin** to ensure full metadata and co
 ## Installation
 
 ```bash
-git clone https://github.com/<your-user>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/CheChu10/tmdb-movie-renamer.git
+cd tmdb-movie-renamer
 
 # Optional virtualenv
 python -m venv .venv
