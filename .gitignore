@@ -1,0 +1,21 @@
+.venv/
+.venv_old/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# IDE metadata
+.idea/
+.vscode/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Logs and run artifacts
+renamer.log
+*.log
+
+# Local configuration
+config.ini
