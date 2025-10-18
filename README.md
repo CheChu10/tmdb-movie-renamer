@@ -41,7 +41,6 @@
   - [Roadmap](#roadmap-1)
   - [Troubleshooting](#troubleshooting)
   - [Credits](#credits)
-
 ---
 
 ## Características
