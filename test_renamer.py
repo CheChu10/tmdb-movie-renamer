@@ -1,6 +1,15 @@
+import errno
+import os
+import shutil
+import sys
+import tempfile
 import unittest
+from typing import Any, Dict, cast
+
+import requests
 from unittest.mock import patch, MagicMock
 from pathlib import Path
+
 import renamer  # Import the script we want to test
 
 class TestMovieNameExtraction(unittest.TestCase):
@@ -75,13 +84,36 @@ class TestTmdbInfoFetcher(unittest.TestCase):
 
         mock_get.side_effect = [mock_search_response, mock_details_response]
 
-        result = renamer.get_tmdb_info('fake_api_key', 'Correct Movie (2023).mkv', 'en', debug=False)
+        result = renamer.get_tmdb_info('fake_api_key', 'Correct Movie (2023).mkv', 'en', None, debug=False)
 
         self.assertIsNotNone(result)
+        result = cast(Dict[str, Any], result)
         self.assertEqual(result['title'], 'Correct Movie')
         # Verify it was called with the primary title and year
         self.assertEqual(mock_get.call_args_list[0].kwargs['params']['query'], 'Correct Movie')
         self.assertEqual(mock_get.call_args_list[0].kwargs['params']['primary_release_year'], '2023')
+
+    @patch('renamer.requests.get')
+    def test_find_by_imdb_id_skips_search(self, mock_get):
+        mock_find = MagicMock()
+        mock_find.json.return_value = {'movie_results': [{'id': 111}]}
+        mock_find.raise_for_status.return_value = None
+
+        mock_details = MagicMock()
+        mock_details.json.return_value = {'id': 111, 'title': 'From IMDb', 'external_ids': {'imdb_id': 'tt1234567'}}
+        mock_details.raise_for_status.return_value = None
+
+        mock_get.side_effect = [mock_find, mock_details]
+
+        out = renamer.get_tmdb_info('fake_api_key', 'Some Movie (2023) [tt1234567].mkv', 'en', None, debug=False)
+        self.assertIsNotNone(out)
+
+        # First call must be /find
+        self.assertIn('/find/tt1234567', mock_get.call_args_list[0].args[0])
+        self.assertEqual(mock_get.call_args_list[0].kwargs['params']['external_source'], 'imdb_id')
+
+        # Second call must be /movie/111
+        self.assertIn('/movie/111', mock_get.call_args_list[1].args[0])
 
     @patch('renamer.requests.get')
     def test_search_uses_fallback_title(self, mock_get):
@@ -104,9 +136,10 @@ class TestTmdbInfoFetcher(unittest.TestCase):
         # The API will be called: 1. Primary w/year (fail), 2. Primary w/o year (fail), 3. Fallback w/year (success), 4. Details
         mock_get.side_effect = [mock_search_fail, mock_search_fail, mock_search_success, mock_details_response]
 
-        result = renamer.get_tmdb_info('fake_api_key', 'Titulo Primario (Fallback Movie) (2023).mkv', 'en', debug=False)
+        result = renamer.get_tmdb_info('fake_api_key', 'Titulo Primario (Fallback Movie) (2023).mkv', 'en', None, debug=False)
 
         self.assertIsNotNone(result)
+        result = cast(Dict[str, Any], result)
         self.assertEqual(result['title'], 'Fallback Movie')
         # Check that the successful call used the fallback query
         self.assertEqual(mock_get.call_args_list[2].kwargs['params']['query'], 'Fallback Movie')
@@ -122,9 +155,10 @@ class TestTmdbInfoFetcher(unittest.TestCase):
         
         mock_get.side_effect = [mock_fail_with_year, mock_success_without_year, mock_details]
 
-        result = renamer.get_tmdb_info('fake_api_key', 'Movie With Wrong Year (2000).mkv', 'en', debug=False)
+        result = renamer.get_tmdb_info('fake_api_key', 'Movie With Wrong Year (2000).mkv', 'en', None, debug=False)
 
         self.assertIsNotNone(result)
+        result = cast(Dict[str, Any], result)
         self.assertEqual(result['title'], 'Movie With Wrong Year')
         # First call has the year
         self.assertIn('primary_release_year', mock_get.call_args_list[0].kwargs['params'])
@@ -143,9 +177,228 @@ class TestTmdbInfoFetcher(unittest.TestCase):
         # It will try title w/ year, title w/o year, fallback w/ year, fallback w/o year
         mock_get.side_effect = [mock_search_fail, mock_search_fail, mock_search_fail, mock_search_fail]
 
-        result = renamer.get_tmdb_info('fake_api_key', 'NonExistent Movie (Also Fake) (2023).mkv', 'en', debug=False)
+        result = renamer.get_tmdb_info('fake_api_key', 'NonExistent Movie (Also Fake) (2023).mkv', 'en', None, debug=False)
         self.assertIsNone(result)
         self.assertEqual(mock_get.call_count, 4)
+
+
+class TestRetryAndRateLimit(unittest.TestCase):
+
+    def setUp(self):
+        renamer._TMDB_RATE_LIMIT_UNTIL = 0.0
+
+    @patch('renamer.requests.get')
+    def test_make_tmdb_request_does_not_retry_on_401(self, mock_get):
+        resp = MagicMock(status_code=401, headers={})
+
+        def raise_401():
+            raise requests.HTTPError("401", response=MagicMock(status_code=401, headers={}))
+
+        resp.raise_for_status.side_effect = raise_401
+        mock_get.return_value = resp
+
+        with self.assertRaises(requests.HTTPError):
+            renamer._make_tmdb_request('https://example.invalid', {}, {})
+
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch('renamer.requests.get')
+    def test_make_tmdb_request_retries_on_500(self, mock_get):
+        now = [0.0]
+
+        def fake_time():
+            return now[0]
+
+        def fake_sleep(secs):
+            now[0] += secs
+
+        resp1 = MagicMock(status_code=500, headers={})
+        resp2 = MagicMock(status_code=500, headers={})
+        resp3 = MagicMock(status_code=200, headers={})
+
+        def raise_500():
+            raise requests.HTTPError("500", response=MagicMock(status_code=500, headers={}))
+
+        resp1.raise_for_status.side_effect = raise_500
+        resp2.raise_for_status.side_effect = raise_500
+        resp3.raise_for_status.return_value = None
+        resp3.json.return_value = {'ok': True}
+
+        mock_get.side_effect = [resp1, resp2, resp3]
+
+        with patch('renamer.time.time', side_effect=fake_time), patch('renamer.time.sleep', side_effect=fake_sleep):
+            out = renamer._make_tmdb_request('https://example.invalid', {}, {})
+
+        self.assertEqual(out, {'ok': True})
+        self.assertEqual(mock_get.call_count, 3)
+        # backoff should have slept 1s then 2s
+        self.assertEqual(now[0], 3.0)
+
+        # timeout must be applied
+        for call in mock_get.call_args_list:
+            self.assertEqual(call.kwargs.get('timeout'), renamer.REQUEST_TIMEOUT)
+
+    @patch('renamer.requests.get')
+    def test_make_tmdb_request_honors_retry_after_on_429(self, mock_get):
+        renamer._TMDB_RATE_LIMIT_UNTIL = 0.0
+
+        now = [0.0]
+
+        def fake_time():
+            return now[0]
+
+        def fake_sleep(secs):
+            now[0] += secs
+
+        resp1 = MagicMock(status_code=429, headers={'Retry-After': '3'})
+
+        def raise_429():
+            raise requests.HTTPError("429", response=MagicMock(status_code=429, headers={'Retry-After': '3'}))
+
+        resp1.raise_for_status.side_effect = raise_429
+
+        resp2 = MagicMock(status_code=200, headers={})
+        resp2.raise_for_status.return_value = None
+        resp2.json.return_value = {'ok': True}
+
+        mock_get.side_effect = [resp1, resp2]
+
+        with patch('renamer.time.time', side_effect=fake_time), patch('renamer.time.sleep', side_effect=fake_sleep):
+            out = renamer._make_tmdb_request('https://example.invalid', {}, {})
+
+        self.assertEqual(out, {'ok': True})
+        self.assertEqual(mock_get.call_count, 2)
+        # should have waited at least Retry-After seconds
+        self.assertGreaterEqual(now[0], 3.0)
+
+
+class TestFileActionsAtomic(unittest.TestCase):
+
+    def test_copy_is_atomic_no_partial_on_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / 'src'
+            dest_dir = Path(td) / 'dest'
+            src_dir.mkdir()
+            dest_dir.mkdir()
+
+            src = src_dir / 'file.bin'
+            dest = dest_dir / 'file.bin'
+
+            src.write_bytes(b'a' * (1024 * 128))
+
+            original_copyfileobj = shutil.copyfileobj
+
+            def failing_copyfileobj(fsrc, fdst, length=0):
+                # Write some bytes then fail (simulates interruption)
+                fdst.write(fsrc.read(4096))
+                fdst.flush()
+                raise OSError('simulated copy failure')
+
+            with patch('renamer.shutil.copyfileobj', side_effect=failing_copyfileobj):
+                with self.assertRaises(OSError):
+                    renamer._atomic_copy(src, dest)
+
+            # Must not leave final dest
+            self.assertFalse(dest.exists())
+
+            # Must not leave temp files
+            leftovers = list(dest_dir.glob(f"{renamer.TEMP_PREFIX}*"))
+            self.assertEqual(leftovers, [])
+
+    def test_move_cross_device_fallback_is_atomic(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / 'src'
+            dest_dir = Path(td) / 'dest'
+            src_dir.mkdir()
+            dest_dir.mkdir()
+
+            src = src_dir / 'file.bin'
+            dest = dest_dir / 'file.bin'
+            src.write_bytes(b'hello')
+
+            # Force first os.replace(src, dest) to behave like cross-device move,
+            # but allow os.replace(tmp, dest) inside _atomic_copy to work.
+            real_replace = os.replace
+
+            def replace_side_effect(a, b):
+                if Path(a) == src and Path(b) == dest:
+                    raise OSError(errno.EXDEV, 'Cross-device link')
+                return real_replace(a, b)
+
+            with patch('renamer.os.replace', side_effect=replace_side_effect):
+                renamer._atomic_move(src, dest)
+
+            self.assertFalse(src.exists())
+            self.assertTrue(dest.exists())
+            self.assertEqual(dest.read_bytes(), b'hello')
+
+            leftovers = list(dest_dir.glob(f"{renamer.TEMP_PREFIX}*"))
+            self.assertEqual(leftovers, [])
+
+
+class TestCollectionNameNormalization(unittest.TestCase):
+
+    def test_strip_collection_designator_basic(self):
+        self.assertEqual(renamer.strip_collection_designator('Harry Potter Collection'), 'Harry Potter')
+
+    def test_strip_collection_designator_spanish_article(self):
+        self.assertEqual(renamer.strip_collection_designator('Mononoke - la colección'), 'Mononoke')
+
+    def test_strip_collection_designator_parenthetical(self):
+        self.assertEqual(renamer.strip_collection_designator('Foo (Collection)'), 'Foo')
+
+
+class TestPathOverlapClassification(unittest.TestCase):
+
+    def test_classify_overlap_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / 'a'
+            b = Path(td) / 'b'
+            a.mkdir()
+            b.mkdir()
+            self.assertEqual(renamer.classify_path_overlap(a, b), 'none')
+
+    def test_classify_overlap_same(self):
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / 'a'
+            a.mkdir()
+            self.assertEqual(renamer.classify_path_overlap(a, a), 'same')
+
+    def test_classify_overlap_src_within_dest(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / 'dest'
+            src = dest / 'sub'
+            dest.mkdir()
+            src.mkdir()
+            self.assertEqual(renamer.classify_path_overlap(src, dest), 'src_within_dest')
+
+    def test_classify_overlap_dest_within_src(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / 'src'
+            dest = src / 'out'
+            src.mkdir()
+            dest.mkdir()
+            self.assertEqual(renamer.classify_path_overlap(src, dest), 'dest_within_src')
+
+
+class TestSourceParsing(unittest.TestCase):
+
+    def test_parse_source_webrip_variants(self):
+        for name in [
+            'Movie (2020) [1080p (WEBRip)].mkv',
+            'Movie (2020) [1080p (WEB-Rip)].mkv',
+            'Movie (2020) [1080p (WebRip)].mkv',
+            'Movie (2020) [1080p (WEB RIP)].mkv',
+        ]:
+            self.assertEqual(renamer.parse_source_from_filename(name), 'WEBRip')
+
+    def test_parse_source_webdl_variants(self):
+        for name in [
+            'Movie (2020) [1080p (WEBDL)].mkv',
+            'Movie (2020) [1080p (WEB-DL)].mkv',
+            'Movie (2020) [1080p (webdl)].mkv',
+        ]:
+            self.assertEqual(renamer.parse_source_from_filename(name), 'WEB-DL')
 
 
 class TestPathBuilding(unittest.TestCase):
