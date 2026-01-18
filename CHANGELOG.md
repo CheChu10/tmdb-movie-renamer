@@ -5,7 +5,7 @@ This file is written in English to keep diffs simple.
 ### 1.1
 
 - More accurate matches when the filename includes an IMDb id (`ttXXXXXXX`) by using TMDB Find API (`/find/{imdb_id}`) instead of ambiguous title search.
-- Keeps the IMDb id from the filename if TMDB does not return one (helps with some unreleased / incomplete entries).
+- Uses an IMDb id from the filename only for matching (TMDB Find API). If TMDB does not return an IMDb id, the output will not include one.
 - Better title selection in the requested language/country using TMDB `translations` and `alternative_titles`.
 - `--lang` supports language + country codes like `es-ES`, `pt-PT`, `pt-BR`. If you only pass a language (e.g. `es`), the script tries to choose a default country using Babel.
 - Collection folder names can be translated using TMDB Collection Translations API.

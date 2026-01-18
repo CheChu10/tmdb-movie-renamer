@@ -887,16 +887,17 @@ def get_tmdb_info(api_key: str, filename: str, lang_code: str, region: Optional[
 
         resp_data = _make_tmdb_request(movie_url, movie_params, headers)
 
-        # If TMDB doesn't provide an IMDb ID (common for unreleased titles), keep the
-        # one present in the filename to preserve the library identity.
-        if filename_imdb_id:
-            ext = resp_data.setdefault('external_ids', {})
-            if not ext.get('imdb_id'):
-                ext['imdb_id'] = filename_imdb_id
-                if debug:
-                    console_logger.info(
-                        Fore.CYAN + f"[DEBUG] Using IMDb ID from filename: {filename_imdb_id}"
-                    )
+        # IMPORTANT: the final output should always reflect TMDB data.
+        # We may use an IMDb id from the filename to find the correct TMDB entry,
+        # but we do not copy that IMDb id into the final metadata if TMDB doesn't
+        # provide one.
+        if debug and filename_imdb_id:
+            tmdb_imdb = (resp_data.get('external_ids') or {}).get('imdb_id')
+            if not tmdb_imdb:
+                console_logger.info(
+                    Fore.CYAN
+                    + f"[DEBUG] TMDB did not provide an IMDb id for this title (filename had {filename_imdb_id})."
+                )
 
         apply_preferred_title(resp_data, lang_code, filename_title, filename_alt_title, region=region, debug=debug)
         apply_preferred_collection_name(resp_data, headers, lang_code, region, debug=debug)
