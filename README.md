@@ -45,15 +45,19 @@
 
 ## Características
 
-- Búsqueda en **TMDB** por título (con heurística de **año** y **título alternativo/fallback**).
+- Identificación en **TMDB** por título+año y, si el archivo contiene un ID de IMDb (`ttXXXXXXX`), búsqueda directa vía **TMDB Find API**.
+- Título final en el idioma pedido usando `translations` y `alternative_titles` (cuando existan) evitando mezclar países.
+- Carpetas de **colecciones** con nombre traducido (cuando exista) consultando **TMDB Collection Translations API**.
+- Normalización de nombres de colección: elimina sufijos ya incluidos por TMDB (`Collection`, `la colección`, `(Collection)`, etc.) y reaplica el sufijo estándar según idioma.
 - Extracción técnica con **pymediainfo**: resolución con tolerancia (1792×1080 ⇒ 1080p), códec vídeo/audio, HDR (bit depth ≥ 10), bitrate, etc.
-- Detección de **fuente** a partir del nombre y/o heurística por altura/bitrate: `WEB-DL`, `BDRip`, `BDRemux`, `UHD BDRemux`, `UHDRip`, `MicroHD`.
-- Carpetas por **colecciones** (p. ej., `Harry Potter - Colección`) y por **primera letra**.
+- Detección de **fuente** a partir del nombre y/o heurística por altura/bitrate: `WEB-DL`, `WEBRip`, `BDRip`, `BDRemux`, `UHD BDRemux`, `UHDRip`, `MicroHD`.
+- Modos: `test` (simulación), `move` (mover), `copy` (copiar) con copias/moves atómicos (tmp `.renamer-tmp-*`).
 - Compatible con la **estructura esperada por Jellyfin**, asegurando detección automática de metadatos, pósters y colecciones sin intervención manual.
-- Metadatos multinivel por idioma (`--lang`): `es`, `en`, `fr`, `de`, `it` (mapa ampliable).
-- Modos: `test` (simulación), `move` (mover), `copy` (copiar).
-- **Logging** en consola (con color) y a fichero `renamer.log`.
+- `--lang` soporta idioma y país (`es`, `es-ES`, `pt`, `pt-PT`, `pt-BR`, etc.). Si no se indica país, se intenta elegir uno por defecto con Babel.
+- **Logging** en consola (con color) y logs rotados: `renamer.log` (acciones) y `renamer.detail.log` (diagnóstico).
+- Solape `--src`/`--dest`: permite re-ejecutar sobre la librería; evita bucles guardando primero la lista de ficheros a procesar cuando aplica.
 - Extensiones soportadas: `.mkv`, `.mp4`, `.avi`.
+
 
 ---
 
@@ -83,6 +87,7 @@ Este script fue diseñado y **probado específicamente con Jellyfin**, asegurand
   - `colorama`
   - `pymediainfo`
   - `rank-torrent-name`  ← (se importa como `from RTN import parse as rtn_parse`)
+  - `Babel`  ← (para inferir la región por defecto: `es` ⇒ `es-ES`, `pt` ⇒ `pt-BR`, etc.)
 - **MediaInfo** instalado en el sistema (necesario para `pymediainfo`):
   - **Debian/Ubuntu**: `sudo apt-get install mediainfo`
   - **Fedora**: `sudo dnf install mediainfo`
@@ -146,6 +151,11 @@ python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --action copy
 # Idioma de metadatos (admite alias como 'spa', 'eng', 'español', 'english'…)
 python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --lang es
 
+# Idioma con región explícita (cuando te importa el país, p.ej. títulos alternativos)
+python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --lang es-ES
+python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --lang pt-PT
+python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --lang pt-BR
+
 # Depuración detallada
 python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --debug
 
@@ -157,7 +167,8 @@ Parámetros:
 
 - `--src` (obligatorio): carpeta de origen (recursiva).
 - `--dest` (obligatorio): carpeta destino.
-- `--lang`: idioma de TMDB (`es` por defecto).
+- `--lang`: idioma de TMDB. Admite variantes por país tipo `es-ES`, `es-MX`, `pt-PT`, `pt-BR`. Si no se especifica país, se intenta elegir uno por defecto con Babel.
+  - Nota: para `pt` el país por defecto suele ser `BR`; usa `pt-PT` si quieres Portugal explícitamente.
 - `--action`: `test` (default) | `move` | `copy`.
 - `--dry-run`: fuerza simulación.
 - `--debug`: log de depuración adicional.
@@ -206,7 +217,8 @@ Parámetros:
 - **`test_renamer.py`**: pruebas (unittest) que cubren extracción de títulos/años, estrategia de búsqueda TMDB y construcción de rutas.
 - **`requirements.txt`**: dependencias Python.
 - **`config.example.ini`**: ejemplo de configuración TMDB.
-- **`renamer.log`**: log persistente con operaciones y errores.
+- **`renamer.log`**: log rotado con operaciones y errores.
+- **`renamer.detail.log`**: log rotado más verboso (decisiones internas / diagnóstico).
 
 ---
 
@@ -227,7 +239,7 @@ python -m unittest -v
 - Solo **películas** (no series).
 - Solo `.mkv`, `.mp4`, `.avi`.
 - La detección de **fuente** es heurística (puede fallar en encodes atípicos).
-- No hay rotación de logs (por ahora).
+- Los logs se rotan automáticamente (`renamer.log` y `renamer.detail.log`).
 
 ---
 
@@ -236,8 +248,9 @@ python -m unittest -v
 - [ ] **Parametrización** completa de plantilla de carpetas/archivos (placeholders tipo `{COLLECTION}/{TITLE} ({YEAR}) …`).
 - [ ] Detecciones ampliadas de HDR (HDR10, DV) y fuente.
 - [ ] Estrategia de **colisiones** (sobrescribir/versión/omitir interactivo).
-- [ ] **Rotación de logs** y niveles configurables.
-- [ ] Más **tests** unitarios/integración (mocks de TMDB/MediaInfo).
+- [x] **Rotación de logs** (`renamer.log` y `renamer.detail.log`).
+- [ ] Niveles de log configurables.
+- [x] Más **tests** unitarios (mocks de TMDB / manejo de ficheros).
 
 ---
 
@@ -314,14 +327,16 @@ python -m unittest -v
 
 ## Features
 
-- **TMDB** search by title with **year** and **fallback title** heuristics.
+- TMDB identification via title+year, and if the filename contains an IMDb ID (`ttXXXXXXX`), direct lookup via the **TMDB Find API**.
+- Final movie title in the requested language using `translations` and `alternative_titles` (when available), without mixing countries.
+- **Collection folders** with translated collection names (when available) via **TMDB Collection Translations API**.
+- Collection name normalization: strips suffixes already included by TMDB (`Collection`, `la colección`, `(Collection)`, etc.) and reapplies a consistent suffix.
 - Technical extraction via **pymediainfo**: resolution with tolerance (e.g., 1792×1080 ⇒ 1080p), video/audio codec, HDR (bit depth ≥ 10), bitrate, etc.
-- **Source** detection from filename and/or height/bitrate heuristic: `WEB-DL`, `BDRip`, `BDRemux`, `UHD BDRemux`, `UHDRip`, `MicroHD`.
-- **Collections** subfolders (e.g., `Harry Potter - Collection`) and **first-letter** top-level grouping.
-- **Jellyfin-ready** structure so the library is recognized without manual tweaks.  
-- Multilingual metadata (`--lang`): `es`, `en`, `fr`, `de`, `it` (extensible map).
-- Actions: `test` (dry-run), `move`, `copy`.
-- Colored console **logging** and persistent log file `renamer.log`.
+- **Source** detection from filename and/or height/bitrate heuristic: `WEB-DL`, `WEBRip`, `BDRip`, `BDRemux`, `UHD BDRemux`, `UHDRip`, `MicroHD`.
+- Actions: `test` (dry-run), `move`, `copy` with atomic copy/move using hidden temp files (`.renamer-tmp-*`).
+- `--lang` supports language + country codes like `es-ES`, `pt-PT`, `pt-BR`. If country is omitted, the script tries to pick a sensible default using Babel.
+- Logging: `renamer.log` (actions) and `renamer.detail.log` (diagnostics), both rotated.
+- Overlapping `--src`/`--dest` is supported; risky cases scan a snapshot of files to avoid infinite loops.
 - Supported extensions: `.mkv`, `.mp4`, `.avi`.
 
 ---
@@ -352,6 +367,7 @@ This tool was **built and tested under Jellyfin** to ensure full metadata and co
   - `colorama`
   - `pymediainfo`
   - `rank-torrent-name`  ← (imported as `from RTN import parse as rtn_parse`)
+  - `Babel`  ← (used to infer default regions like `es` ⇒ `es-ES`, `pt` ⇒ `pt-BR`)
 - **MediaInfo** installed on your system (required by `pymediainfo`):
   - **Debian/Ubuntu**: `sudo apt-get install mediainfo`
   - **Fedora**: `sudo dnf install mediainfo`
@@ -426,7 +442,8 @@ Parameters:
 
 - `--src` (required): source folder (recursive).
 - `--dest` (required): destination folder.
-- `--lang`: TMDB language (`es` by default).
+- `--lang`: TMDB language / country (examples: `es`, `es-ES`, `es-MX`, `pt`, `pt-PT`, `pt-BR`).
+  - Note: when country is omitted, Babel is used to infer a default. For Portuguese, `pt` typically resolves to `pt-BR`; use `pt-PT` explicitly for Portugal.
 - `--action`: `test` (default) | `move` | `copy`.
 - `--dry-run`: force simulation.
 - `--debug`: extra debug logging.
@@ -474,7 +491,8 @@ Parameters:
 - **`test_renamer.py`**: unit tests covering title/year extraction, TMDB search strategy, and destination path building.
 - **`requirements.txt`**: Python dependencies.
 - **`config.example.ini`**: TMDB config template.
-- **`renamer.log`**: persistent log with operations and errors.
+- **`renamer.log`**: rotated log with operations and errors.
+- **`renamer.detail.log`**: rotated verbose log (internal decisions / diagnostics).
 
 ---
 
@@ -494,7 +512,7 @@ python -m unittest -v
 - **Movies only** (no TV shows).
 - Only `.mkv`, `.mp4`, `.avi`.
 - **Source** detection is heuristic (can fail on atypical encodes).
-- No log rotation yet.
+- Log files are rotated automatically (`renamer.log` and `renamer.detail.log`).
 
 ---
 
@@ -503,8 +521,9 @@ python -m unittest -v
 - [ ] Full **templating/parameterization** of folder and filename patterns (e.g., `{COLLECTION}/{TITLE} ({YEAR}) …`).
 - [ ] Enhanced **HDR** (HDR10, Dolby Vision) and source detection.
 - [ ] **Collision** strategy (overwrite/version/interactive skip).
-- [ ] **Log rotation** and configurable verbosity.
-- [ ] More **unit/integration tests** (mock TMDB/MediaInfo).
+- [x] **Log rotation** (`renamer.log` and `renamer.detail.log`).
+- [ ] Configurable log levels.
+- [x] More **unit tests** (TMDB mocks / file operations).
 
 ---
 
