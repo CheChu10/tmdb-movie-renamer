@@ -1,6 +1,4 @@
 requests
 colorama
 pymediainfo
-rank-torrent-name
 Babel
-requests

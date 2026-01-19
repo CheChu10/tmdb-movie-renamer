@@ -83,6 +83,62 @@ LOCK_FILE = Path(__file__).parent / '.renamer.lock'
 # Temp file prefix (for atomic copies)
 TEMP_PREFIX = '.renamer-tmp-'
 
+# File copy buffer size (bytes)
+COPY_CHUNK_SIZE = 1024 * 1024
+
+# Supported movie file extensions
+SUPPORTED_MOVIE_EXTENSIONS = {'.mkv', '.mp4', '.avi'}
+
+# Glob wildcard markers for --src expansion
+GLOB_WILDCARD_CHARS = ('*', '?', '[')
+
+# Fallback title tags that should be ignored if found in parentheses
+FALLBACK_TITLE_TAG_KEYWORDS = (
+    'bluray',
+    'web-dl',
+    'bdrip',
+    'microhd',
+    'uhdrip',
+    'bdremux',
+    'webdl',
+)
+
+# Source aliases found in release names (needle -> normalized)
+SOURCE_NAME_ALIASES = (
+    ('uhd bdremux', 'UHD BDRemux'),
+    ('bdremux', 'BDRemux'),
+    ('bdrip', 'BDRip'),
+    ('bluray', 'BluRay'),
+    ('blu-ray', 'BluRay'),
+    ('microhd', 'MicroHD'),
+    ('webrip', 'WEBRip'),
+    ('web-rip', 'WEBRip'),
+    ('web rip', 'WEBRip'),
+    ('webdl', 'WEB-DL'),
+    ('web-dl', 'WEB-DL'),
+)
+
+# Resolution classification tiers and tolerance
+RESOLUTION_TOLERANCE = 0.95
+RESOLUTION_CLASS_TIERS = (
+    (3840, 2160, '2160p'),
+    (2560, 1440, '1440p'),
+    (1920, 1080, '1080p'),
+    (1280, 720, '720p'),
+)
+
+# Deduced source thresholds
+DEFAULT_DEDUCED_SOURCE = 'WEB-DL'
+UHD_HEIGHT_THRESHOLD = 2100
+UHD_BDREMUX_BITRATE_MBPS = 40
+BDREMUX_BITRATE_MBPS = 25
+BDRIP_BITRATE_MBPS = 10
+
+# Filename sanitization
+ILLEGAL_FILENAME_CHARS = r'<>:"/\\|?*'
+NUMERIC_TIME_COLON_RE = re.compile(r'(?<=\d):(?=\d)')
+
+# IMDB id detection
 IMDB_ID_RE = re.compile(r'\btt\d{7,8}\b', flags=re.IGNORECASE)
 
 # Year detection from filenames
@@ -253,14 +309,13 @@ def strip_collection_designator(name: str) -> str:
 
 
 def sanitize_filename(name: str) -> str:
-    """Replaces characters illegal in Windows filenames with ' -' and normalizes Unicode."""
-    illegal_chars = r'<>:"/\\|?*'
-    sanitized_name = name
+    """Return a filesystem-safe name while preserving common title punctuation."""
+    sanitized_name = unicodedata.normalize('NFC', name)
 
-    normalized = unicodedata.normalize('NFC', sanitized_name)
-    sanitized_name = normalized
+    # Keep time-like values readable: 15:17 -> 15.17 instead of '15 -17'.
+    sanitized_name = NUMERIC_TIME_COLON_RE.sub('.', sanitized_name)
 
-    for char in illegal_chars:
+    for char in ILLEGAL_FILENAME_CHARS:
         sanitized_name = sanitized_name.replace(char, ' -')
 
     sanitized_name = sanitized_name.strip()
@@ -299,7 +354,7 @@ def _expand_src_inputs(src_inputs: List[str]) -> List[Path]:
 
         # If it contains glob chars, expand it ourselves (useful when user quotes
         # the argument and the shell doesn't expand it).
-        if any(c in s for c in ['*', '?', '[']):
+        if any(c in s for c in GLOB_WILDCARD_CHARS):
             matches = [Path(p) for p in glob.glob(s, recursive=True)]
             for p in matches:
                 if p not in seen:
@@ -363,7 +418,7 @@ def get_movie_name_and_year(filename: str, debug: bool = False) -> Tuple[str, Op
         if (
             fallback_text
             and not fallback_text.isdigit()
-            and not any(tag in fallback_text.lower() for tag in ['bluray', 'web-dl', 'bdrip', 'microhd', 'uhdrip', 'bdremux', 'webdl'])
+            and not any(tag in fallback_text.lower() for tag in FALLBACK_TITLE_TAG_KEYWORDS)
         ):
             fallback = fallback_text
 
@@ -995,15 +1050,8 @@ def get_resolution_class(width: Optional[int], height: Optional[int]) -> str:
 
     # Tolerancia (~5%) para encodes no estándar, anamórficos o con recortes.
     # Con esto: h≈1080 => 1080p aunque w<1920 (p.ej., 1792x1080).
-    tiers = [
-        (3840, 2160, "2160p"),
-        (2560, 1440, "1440p"),
-        (1920, 1080, "1080p"),
-        (1280,  720,  "720p"),
-    ]
-
-    for w_th, h_th, label in tiers:
-        if w >= int(w_th * 0.95) or h >= int(h_th * 0.95):
+    for w_th, h_th, label in RESOLUTION_CLASS_TIERS:
+        if w >= int(w_th * RESOLUTION_TOLERANCE) or h >= int(h_th * RESOLUTION_TOLERANCE):
             return label
 
     return f"{h}p"
@@ -1064,21 +1112,7 @@ def parse_source_from_filename(filename: str) -> Optional[str]:
     filename_lower = filename.lower()
     # Normalize common source variants found in release names.
     # Order matters: longer/more specific patterns first.
-    source_aliases = [
-        ('uhd bdremux', 'UHD BDRemux'),
-        ('bdremux', 'BDRemux'),
-        ('bdrip', 'BDRip'),
-        ('bluray', 'BluRay'),
-        ('blu-ray', 'BluRay'),
-        ('microhd', 'MicroHD'),
-        ('webrip', 'WEBRip'),
-        ('web-rip', 'WEBRip'),
-        ('web rip', 'WEBRip'),
-        ('webdl', 'WEB-DL'),
-        ('web-dl', 'WEB-DL'),
-    ]
-
-    for needle, normalized in source_aliases:
+    for needle, normalized in SOURCE_NAME_ALIASES:
         if needle in filename_lower:
             return normalized
     return None
@@ -1095,14 +1129,14 @@ def deduce_source_from_mediainfo(media_info: Dict[str, Any], debug: bool = False
     if debug:
         console_logger.info(Fore.CYAN + f"[DEBUG] Deducing source: Height={height}p, Bitrate={bitrate_mbps:.2f} Mbps")
 
-    source = "WEB-DL"  # Default fallback
-    if height >= 2100 and bitrate_mbps > 40:
+    source = DEFAULT_DEDUCED_SOURCE
+    if height >= UHD_HEIGHT_THRESHOLD and bitrate_mbps > UHD_BDREMUX_BITRATE_MBPS:
         source = 'UHD BDRemux'
-    elif height >= 2100:
+    elif height >= UHD_HEIGHT_THRESHOLD:
         source = 'UHDRip'
-    elif height >= 1080 and bitrate_mbps > 25:
+    elif height >= 1080 and bitrate_mbps > BDREMUX_BITRATE_MBPS:
         source = 'BDRemux'
-    elif height >= 1080 and bitrate_mbps > 10:
+    elif height >= 1080 and bitrate_mbps > BDRIP_BITRATE_MBPS:
         source = 'BDRip'
 
     if debug:
@@ -1222,7 +1256,7 @@ def _atomic_copy(src_path: Path, dest_path: Path) -> None:
     try:
         with open(src_path, 'rb') as fsrc:
             with open(tmp_path, 'wb') as fdst:
-                shutil.copyfileobj(fsrc, fdst, length=1024 * 1024)
+                shutil.copyfileobj(fsrc, fdst, length=COPY_CHUNK_SIZE)
                 fdst.flush()
                 os.fsync(fdst.fileno())
 
@@ -1507,13 +1541,13 @@ def main() -> None:
             seen: Set[Path] = set()
             for root in config.get('input_paths', []):
                 if root.is_file():
-                    if root.suffix.lower() in ['.mkv', '.mp4', '.avi'] and root not in seen:
+                    if root.suffix.lower() in SUPPORTED_MOVIE_EXTENSIONS and root not in seen:
                         out.append(root)
                         seen.add(root)
                     continue
 
                 for p in root.rglob('*'):
-                    if p.is_file() and p.suffix.lower() in ['.mkv', '.mp4', '.avi'] and p not in seen:
+                    if p.is_file() and p.suffix.lower() in SUPPORTED_MOVIE_EXTENSIONS and p not in seen:
                         out.append(p)
                         seen.add(p)
             return out

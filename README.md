@@ -86,7 +86,6 @@ Este script fue diseñado y **probado específicamente con Jellyfin**, asegurand
   - `requests`
   - `colorama`
   - `pymediainfo`
-  - `rank-torrent-name`  ← (se importa como `from RTN import parse as rtn_parse`)
   - `Babel`  ← (para inferir la región por defecto: `es` ⇒ `es-ES`, `pt` ⇒ `pt-BR`, etc.)
 - **MediaInfo** instalado en el sistema (necesario para `pymediainfo`):
   - **Debian/Ubuntu**: `sudo apt-get install mediainfo`
@@ -277,7 +276,7 @@ python -m unittest -v
 
 - [TheMovieDB](https://www.themoviedb.org/) (metadatos).
 - [MediaInfo](https://mediaarea.net/) y `pymediainfo`.
-- Paquete **rank-torrent-name** (importado como `RTN`) para parseo de títulos estilo release.
+- (Opcional futuro) parseo avanzado de release names estilo torrent.
 
 ---
 
@@ -369,7 +368,6 @@ This tool was **built and tested under Jellyfin** to ensure full metadata and co
   - `requests`
   - `colorama`
   - `pymediainfo`
-  - `rank-torrent-name`  ← (imported as `from RTN import parse as rtn_parse`)
   - `Babel`  ← (used to infer default regions like `es` ⇒ `es-ES`, `pt` ⇒ `pt-BR`)
 - **MediaInfo** installed on your system (required by `pymediainfo`):
   - **Debian/Ubuntu**: `sudo apt-get install mediainfo`
@@ -553,4 +551,4 @@ python -m unittest -v
 
 - [TheMovieDB](https://www.themoviedb.org/) (metadata).
 - [MediaInfo](https://mediaarea.net/) and `pymediainfo`.
-- **rank-torrent-name** package (imported as `RTN`) for release-style title parsing.
+- (Future optional) advanced torrent-style release name parsing.
