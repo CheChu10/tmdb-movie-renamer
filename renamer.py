@@ -11,6 +11,7 @@ import argparse
 import atexit
 import configparser
 import errno
+import glob
 import json
 import logging
 import os
@@ -83,6 +84,12 @@ LOCK_FILE = Path(__file__).parent / '.renamer.lock'
 TEMP_PREFIX = '.renamer-tmp-'
 
 IMDB_ID_RE = re.compile(r'\btt\d{7,8}\b', flags=re.IGNORECASE)
+
+# Year detection from filenames
+_MIN_PLAUSIBLE_YEAR = 1888
+_MAX_PLAUSIBLE_YEAR_SKEW = 1  # allow next-year releases
+_PARENS_YEAR_CAPTURE_RE = re.compile(r'\(\s*(\d{4})\s*\)')
+_PARENS_YEAR_FULL_RE = re.compile(r'^\(\s*(\d{4})\s*\)$')
 
 # Collection suffix normalization
 # TMDB collection names often include a localized "collection" suffix already
@@ -271,24 +278,81 @@ def extract_imdb_id_from_filename(filename: str) -> Optional[str]:
     return m.group(0).lower()
 
 
+def _expand_src_inputs(src_inputs: List[str]) -> List[Path]:
+    """Expand --src values.
+
+    Supports either:
+    - one or more directories
+    - glob patterns (e.g. /movies/1/12*)
+    - individual files
+
+    This is intentionally glob (shell-style) rather than regex.
+    """
+
+    out: List[Path] = []
+    seen: Set[Path] = set()
+
+    for raw in src_inputs:
+        s = os.path.expandvars(os.path.expanduser((raw or '').strip()))
+        if not s:
+            continue
+
+        # If it contains glob chars, expand it ourselves (useful when user quotes
+        # the argument and the shell doesn't expand it).
+        if any(c in s for c in ['*', '?', '[']):
+            matches = [Path(p) for p in glob.glob(s, recursive=True)]
+            for p in matches:
+                if p not in seen:
+                    out.append(p)
+                    seen.add(p)
+            continue
+
+        p = Path(s)
+        if p not in seen:
+            out.append(p)
+            seen.add(p)
+
+    return out
+
+
 def get_movie_name_and_year(filename: str, debug: bool = False) -> Tuple[str, Optional[str], Optional[str]]:
     """Extracts a searchable movie title, year and a single fallback title from a filename."""
     stem = Path(filename).stem
 
     name = re.sub(r'[._]', ' ', stem)
 
-    year_match = re.search(r'\((19[89]\d|20[0-4]\d)\)', name)
-    year = year_match.group(1) if year_match else None
+    # Prefer the last plausible year in parentheses: many release names include
+    # multiple (...) groups.
+    year = None
+    year_match = None
+    max_year = time.localtime().tm_year + _MAX_PLAUSIBLE_YEAR_SKEW
+    for m in _PARENS_YEAR_CAPTURE_RE.finditer(name):
+        try:
+            y = int(m.group(1))
+        except Exception:
+            continue
+        if _MIN_PLAUSIBLE_YEAR <= y <= max_year:
+            year = str(y)
+            year_match = m
 
-    if year_match:
+    if year_match is not None:
         name = name[:year_match.start()].strip()
 
     fallback = None
 
-    pattern_with_year = re.compile(r'\((19[89]\d|20[0-4]\d)\)')
+    # Identify non-year parentheses (e.g. translated title) for fallback searches.
     all_parens = list(re.finditer(r'\([^)]*\)', name))
-
-    year_parens = [m for m in all_parens if pattern_with_year.match(m.group())]
+    year_parens = []
+    for m in all_parens:
+        m2 = _PARENS_YEAR_FULL_RE.match(m.group())
+        if not m2:
+            continue
+        try:
+            y = int(m2.group(1))
+        except Exception:
+            continue
+        if _MIN_PLAUSIBLE_YEAR <= y <= max_year:
+            year_parens.append(m)
 
     non_year_parens = [m for m in all_parens if m not in year_parens]
 
@@ -296,7 +360,11 @@ def get_movie_name_and_year(filename: str, debug: bool = False) -> Tuple[str, Op
         first_non_year_paren = non_year_parens[0]
         fallback_text = first_non_year_paren.group()[1:-1].strip()
 
-        if fallback_text and not any(tag in fallback_text.lower() for tag in ['bluray', 'web-dl', 'bdrip', 'microhd', 'uhdrip', 'bdremux', 'webdl']):
+        if (
+            fallback_text
+            and not fallback_text.isdigit()
+            and not any(tag in fallback_text.lower() for tag in ['bluray', 'web-dl', 'bdrip', 'microhd', 'uhdrip', 'bdremux', 'webdl'])
+        ):
             fallback = fallback_text
 
     name = re.sub(r'\[.*?\]|\(.*?\)', '', name).strip()
@@ -1250,7 +1318,16 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
         description="Renames and organizes movie files, similar to FileBot.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument('--src', required=True, type=Path, help="Source directory containing movies to process.")
+    parser.add_argument(
+        '--src',
+        required=True,
+        nargs='+',
+        type=str,
+        help=(
+            "Source directory/file or glob pattern(s) containing movies to process. "
+            "Examples: /path/movies or /path/movies/12*"
+        ),
+    )
     parser.add_argument('--dest', required=True, type=Path, help="Destination directory for organized movies.")
     parser.add_argument(
         '--lang',
@@ -1277,25 +1354,43 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
         console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Please set your TMDB API key in 'config.ini'.")
         return None
 
-    if not args.src.is_dir() or not args.dest.is_dir():
+    expanded_src = _expand_src_inputs(args.src)
+    if not expanded_src:
+        console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Source did not match any paths.")
+        return None
+
+    if not args.dest.is_dir():
+        console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Destination is not a valid directory.")
+        return None
+
+    # Keep only valid sources (directories or individual files).
+    input_paths: List[Path] = [p for p in expanded_src if p.exists() and (p.is_dir() or p.is_file())]
+    if not input_paths:
         console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Source or destination is not a valid directory.")
         return None
 
-    overlap_kind = classify_path_overlap(args.src, args.dest)
     scan_snapshot = False
+    overlap_kinds: Set[str] = set()
+
+    for p in input_paths:
+        if not p.is_dir():
+            continue
+        kind = classify_path_overlap(p, args.dest)
+        overlap_kinds.add(kind)
+        if kind in {'same', 'dest_within_src'}:
+            scan_snapshot = True
 
     # We used to hard-fail on any overlap. In practice, some overlap is safe
     # (e.g. scanning a movie folder inside the library root) and "same" paths
     # are useful for dry-runs.
-    if overlap_kind in {'same', 'dest_within_src'}:
+    if scan_snapshot:
         # Potentially risky when moving/copying because the destination is inside
         # the scan tree; avoid infinite loops by taking a snapshot of files.
-        scan_snapshot = True
         console_logger.info(
-            f"{COLOR_MAP['TEST']}[WARN]{Style.RESET_ALL} Source and destination directories overlap ({overlap_kind}). "
+            f"{COLOR_MAP['TEST']}[WARN]{Style.RESET_ALL} Source and destination directories overlap ({', '.join(sorted(overlap_kinds))}). "
             "Using snapshot scan mode to avoid infinite loops."
         )
-    elif overlap_kind == 'src_within_dest':
+    elif 'src_within_dest' in overlap_kinds:
         # Safe: we scan a subset of the destination tree.
         if args.debug:
             console_logger.info(
@@ -1306,14 +1401,14 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
 
     return {
         'api_key': api_key,
-        'input_dir': args.src,
+        'input_paths': input_paths,
         'output_dir': args.dest,
         'lang_code': lang_code,
         'region': region,
         'action': 'test' if args.dry_run else args.action,
         'debug': args.debug,
         'scan_snapshot': scan_snapshot,
-        'overlap_kind': overlap_kind,
+        'overlap_kinds': overlap_kinds,
     }
 
 
@@ -1402,24 +1497,37 @@ def main() -> None:
             sys.exit(1)
 
         action = config['action']
-        file_logger.info(f"Starting recursive scan in: {config['input_dir']} with action: {action.upper()}")
+        src_display = ", ".join(str(p) for p in config.get('input_paths', []))
+        file_logger.info(f"Starting recursive scan in: {src_display} with action: {action.upper()}")
         if action == 'test':
             console_logger.info(COLOR_MAP['TEST'] + "Simulation mode active. No changes will be made.")
 
+        def _iter_input_files() -> List[Path]:
+            out: List[Path] = []
+            seen: Set[Path] = set()
+            for root in config.get('input_paths', []):
+                if root.is_file():
+                    if root.suffix.lower() in ['.mkv', '.mp4', '.avi'] and root not in seen:
+                        out.append(root)
+                        seen.add(root)
+                    continue
+
+                for p in root.rglob('*'):
+                    if p.is_file() and p.suffix.lower() in ['.mkv', '.mp4', '.avi'] and p not in seen:
+                        out.append(p)
+                        seen.add(p)
+            return out
+
         if config.get('scan_snapshot'):
             # Snapshot scan avoids infinite loops when dest is inside src (or same).
-            files = [
-                p for p in config['input_dir'].rglob('*')
-                if p.is_file() and p.suffix.lower() in ['.mkv', '.mp4', '.avi']
-            ]
+            files = _iter_input_files()
             for filepath in files:
                 process_file(filepath, config)
                 console_logger.info("-" * 20)
         else:
-            for filepath in config['input_dir'].rglob('*'):
-                if filepath.is_file() and filepath.suffix.lower() in ['.mkv', '.mp4', '.avi']:
-                    process_file(filepath, config)
-                    console_logger.info("-" * 20)
+            for filepath in _iter_input_files():
+                process_file(filepath, config)
+                console_logger.info("-" * 20)
 
         console_logger.info("Process completed.")
         file_logger.info("Process completed.")

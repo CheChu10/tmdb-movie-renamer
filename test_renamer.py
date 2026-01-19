@@ -34,6 +34,22 @@ class TestMovieNameExtraction(unittest.TestCase):
         self.assertEqual(year, "2021")
         self.assertIsNone(fallback)
 
+    def test_extract_old_year(self):
+        """Supports classic films (pre-1980) with (YYYY)."""
+        filename = "Alien (1979).mkv"
+        name, year, fallback = renamer.get_movie_name_and_year(filename)
+        self.assertEqual(name, "Alien")
+        self.assertEqual(year, "1979")
+        self.assertIsNone(fallback)
+
+    def test_extract_future_year_sanity_filter(self):
+        """Rejects implausible years so they don't influence TMDB search."""
+        filename = "Some Movie (3000).mkv"
+        name, year, fallback = renamer.get_movie_name_and_year(filename)
+        self.assertEqual(name, "Some Movie")
+        self.assertIsNone(year)
+        self.assertIsNone(fallback)
+
     def test_extract_no_year(self):
         """
         Tests extraction when the filename does not contain a year.
@@ -379,6 +395,26 @@ class TestPathOverlapClassification(unittest.TestCase):
             src.mkdir()
             dest.mkdir()
             self.assertEqual(renamer.classify_path_overlap(src, dest), 'dest_within_src')
+
+
+class TestSourceExpansion(unittest.TestCase):
+
+    def test_expand_src_inputs_glob(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / '120').mkdir()
+            (root / '121').mkdir()
+            (root / '130').mkdir()
+
+            out = renamer._expand_src_inputs([str(root / '12*')])
+            self.assertEqual(set(out), {root / '120', root / '121'})
+
+    def test_expand_src_inputs_plain(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'src').mkdir()
+            out = renamer._expand_src_inputs([str(root / 'src')])
+            self.assertEqual(out, [root / 'src'])
 
 
 class TestSourceParsing(unittest.TestCase):
