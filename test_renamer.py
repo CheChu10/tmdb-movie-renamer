@@ -12,73 +12,105 @@ from pathlib import Path
 
 import renamer  # Import the script we want to test
 
+class TestFilenameSanitization(unittest.TestCase):
+
+    def test_sanitize_filename_cases(self):
+        cases = [
+            {'name': '15:17 Tren a París', 'expected': '15.17 Tren a París'},
+            {'name': '15:17', 'expected': '15.17'},
+            {'name': 'A/B:C', 'expected': 'A -B -C'},
+        ]
+
+        for c in cases:
+            with self.subTest(name=c['name']):
+                self.assertEqual(renamer.sanitize_filename(c['name']), c['expected'])
+
+
 class TestMovieNameExtraction(unittest.TestCase):
 
-    def test_extract_with_fallback(self):
-        """
-        Tests extraction with a primary Spanish title and an English fallback title.
-        """
-        filename = "La cueva de Barron (Barron's Cove) (2024).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "La cueva de Barron")
-        self.assertEqual(year, "2024")
-        self.assertEqual(fallback, "Barron's Cove")
+    def test_extraction_cases(self):
+        cases = [
+            {
+                'filename': "La cueva de Barron (Barron's Cove) (2024).mkv",
+                'name': 'La cueva de Barron',
+                'year': '2024',
+                'fallback': "Barron's Cove",
+            },
+            {
+                'filename': 'Dune (2021).mkv',
+                'name': 'Dune',
+                'year': '2021',
+                'fallback': None,
+            },
+            {
+                'filename': 'Alien (1979).mkv',
+                'name': 'Alien',
+                'year': '1979',
+                'fallback': None,
+            },
+            {
+                'filename': 'Some Movie (3000).mkv',
+                'name': 'Some Movie',
+                'year': None,
+                'fallback': None,
+            },
+            {
+                'filename': 'Pulp Fiction.mkv',
+                'name': 'Pulp Fiction',
+                'year': None,
+                'fallback': None,
+            },
+            {
+                'filename': 'Inception [1080p BluRay] (2010).mkv',
+                'name': 'Inception',
+                'year': '2010',
+                'fallback': None,
+            },
+            {
+                'filename': 'Movie Title (Fallback Title) (Another Tag) (2022).mkv',
+                'name': 'Movie Title',
+                'year': '2022',
+                'fallback': 'Fallback Title',
+            },
+            # Torrent-style / backups / noisy names
+            {
+                'filename': 'Movie.Title.2021.1080p.WEB-DL.DD5.1.x264-GROUP.mkv',
+                'name': 'Movie Title 2021 1080p WEB-DL DD5 1 x264-GROUP',
+                'year': None,
+                'fallback': None,
+            },
+            {
+                'filename': 'Movie Title (2021) (1080p WEB-DL x264) (GROUP).mkv',
+                'name': 'Movie Title',
+                'year': '2021',
+                'fallback': None,
+            },
+            {
+                'filename': 'Movie Title (Director\'s Cut) (2021) (BluRay).mkv',
+                'name': 'Movie Title',
+                'year': '2021',
+                'fallback': "Director's Cut",
+            },
+            {
+                'filename': 'Movie Title (2021) [BACKUP].mkv',
+                'name': 'Movie Title',
+                'year': '2021',
+                'fallback': None,
+            },
+            {
+                'filename': 'Movie Title (Remastered) (1972) [1080p].mkv',
+                'name': 'Movie Title',
+                'year': '1972',
+                'fallback': 'Remastered',
+            },
+        ]
 
-    def test_extract_simple_title(self):
-        """
-        Tests extraction for a standard filename with no fallback.
-        """
-        filename = "Dune (2021).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Dune")
-        self.assertEqual(year, "2021")
-        self.assertIsNone(fallback)
-
-    def test_extract_old_year(self):
-        """Supports classic films (pre-1980) with (YYYY)."""
-        filename = "Alien (1979).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Alien")
-        self.assertEqual(year, "1979")
-        self.assertIsNone(fallback)
-
-    def test_extract_future_year_sanity_filter(self):
-        """Rejects implausible years so they don't influence TMDB search."""
-        filename = "Some Movie (3000).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Some Movie")
-        self.assertIsNone(year)
-        self.assertIsNone(fallback)
-
-    def test_extract_no_year(self):
-        """
-        Tests extraction when the filename does not contain a year.
-        """
-        filename = "Pulp Fiction.mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Pulp Fiction")
-        self.assertIsNone(year)
-        self.assertIsNone(fallback)
-
-    def test_extract_with_release_tags(self):
-        """
-        Tests that release tags in brackets are correctly stripped.
-        """
-        filename = "Inception [1080p BluRay] (2010).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Inception")
-        self.assertEqual(year, "2010")
-        self.assertIsNone(fallback)
-
-    def test_extract_with_multiple_parentheses(self):
-        """
-        Tests that the first non-year parenthesis is chosen as fallback.
-        """
-        filename = "Movie Title (Fallback Title) (Another Tag) (2022).mkv"
-        name, year, fallback = renamer.get_movie_name_and_year(filename)
-        self.assertEqual(name, "Movie Title")
-        self.assertEqual(year, "2022")
-        self.assertEqual(fallback, "Fallback Title")
+        for c in cases:
+            with self.subTest(filename=c['filename']):
+                name, year, fallback = renamer.get_movie_name_and_year(c['filename'])
+                self.assertEqual(name, c['name'])
+                self.assertEqual(year, c['year'])
+                self.assertEqual(fallback, c['fallback'])
 
 
 class TestTmdbInfoFetcher(unittest.TestCase):
@@ -419,22 +451,31 @@ class TestSourceExpansion(unittest.TestCase):
 
 class TestSourceParsing(unittest.TestCase):
 
-    def test_parse_source_webrip_variants(self):
-        for name in [
-            'Movie (2020) [1080p (WEBRip)].mkv',
-            'Movie (2020) [1080p (WEB-Rip)].mkv',
-            'Movie (2020) [1080p (WebRip)].mkv',
-            'Movie (2020) [1080p (WEB RIP)].mkv',
-        ]:
-            self.assertEqual(renamer.parse_source_from_filename(name), 'WEBRip')
+    def test_parse_source_variants(self):
+        cases = [
+            {
+                'source': 'WEBRip',
+                'names': [
+                    'Movie (2020) [1080p (WEBRip)].mkv',
+                    'Movie (2020) [1080p (WEB-Rip)].mkv',
+                    'Movie (2020) [1080p (WebRip)].mkv',
+                    'Movie (2020) [1080p (WEB RIP)].mkv',
+                ],
+            },
+            {
+                'source': 'WEB-DL',
+                'names': [
+                    'Movie (2020) [1080p (WEBDL)].mkv',
+                    'Movie (2020) [1080p (WEB-DL)].mkv',
+                    'Movie (2020) [1080p (webdl)].mkv',
+                ],
+            },
+        ]
 
-    def test_parse_source_webdl_variants(self):
-        for name in [
-            'Movie (2020) [1080p (WEBDL)].mkv',
-            'Movie (2020) [1080p (WEB-DL)].mkv',
-            'Movie (2020) [1080p (webdl)].mkv',
-        ]:
-            self.assertEqual(renamer.parse_source_from_filename(name), 'WEB-DL')
+        for c in cases:
+            for name in c['names']:
+                with self.subTest(name=name, source=c['source']):
+                    self.assertEqual(renamer.parse_source_from_filename(name), c['source'])
 
 
 class TestPathBuilding(unittest.TestCase):

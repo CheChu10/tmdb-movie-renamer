@@ -2,6 +2,13 @@
 
 This file is written in English to keep diffs simple.
 
+### 1.2.1
+
+- Fix filename sanitization for time-like titles (e.g. `15:17` -> `15.17`).
+- Remove unused `rank-torrent-name` dependency and update docs accordingly.
+- Expand filename parsing tests with noisy/torrent-style cases and consolidate redundant test cases.
+- Internal cleanup: centralize parsing constants (source aliases, resolution tiers, copy buffer).
+
 ### 1.2
 
 - `--src` now supports multiple inputs and glob patterns (shell-style, e.g. `/movies/1/12*`) in addition to plain directories.
