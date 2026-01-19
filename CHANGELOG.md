@@ -2,6 +2,11 @@
 
 This file is written in English to keep diffs simple.
 
+### 1.2
+
+- `--src` now supports multiple inputs and glob patterns (shell-style, e.g. `/movies/1/12*`) in addition to plain directories.
+- Year parsing from filenames is now more robust: detects any `(YYYY)` and validates it against a plausible range (1888..current_year+1).
+
 ### 1.1
 
 - More accurate matches when the filename includes an IMDb id (`ttXXXXXXX`) by using TMDB Find API (`/find/{imdb_id}`) instead of ambiguous title search.
