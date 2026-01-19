@@ -159,13 +159,16 @@ python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --lang pt-BR
 # Depuración detallada
 python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --debug
 
+# Procesar solo un subconjunto usando glob (cuando el shell no expande, p.ej. entre comillas)
+python renamer.py --src "/path/to/library/movies/1/12*" --dest "/path/to/library/movies" --action test --lang es
+
 # Forzar simulación aunque action sea move/copy
 python renamer.py --src "/ruta/descargas" --dest "/ruta/libreria" --action move --dry-run
 ```
 
 Parámetros:
 
-- `--src` (obligatorio): carpeta de origen (recursiva).
+- `--src` (obligatorio): uno o más paths. Puede ser carpeta, fichero o patrón tipo glob (por ejemplo `"/movies/1/12*"`).
 - `--dest` (obligatorio): carpeta destino.
 - `--lang`: idioma de TMDB. Admite variantes por país tipo `es-ES`, `es-MX`, `pt-PT`, `pt-BR`. Si no se especifica país, se intenta elegir uno por defecto con Babel.
   - Nota: para `pt` el país por defecto suele ser `BR`; usa `pt-PT` si quieres Portugal explícitamente.
@@ -434,13 +437,16 @@ python renamer.py --src "/path/downloads" --dest "/path/library" --lang en
 # Verbose debug
 python renamer.py --src "/path/downloads" --dest "/path/library" --debug
 
+# Process only a subset using glob patterns (useful when quoting prevents shell expansion)
+python renamer.py --src "/path/to/library/movies/1/12*" --dest "/path/to/library/movies" --action test --lang es
+
 # Force dry-run even if action is move/copy
 python renamer.py --src "/path/downloads" --dest "/path/library" --action move --dry-run
 ```
 
 Parameters:
 
-- `--src` (required): source folder (recursive).
+- `--src` (required): one or more paths. Can be a folder, a single file, or a glob pattern (e.g. `"/movies/1/12*"`).
 - `--dest` (required): destination folder.
 - `--lang`: TMDB language / country (examples: `es`, `es-ES`, `es-MX`, `pt`, `pt-PT`, `pt-BR`).
   - Note: when country is omitted, Babel is used to infer a default. For Portuguese, `pt` typically resolves to `pt-BR`; use `pt-PT` explicitly for Portugal.
