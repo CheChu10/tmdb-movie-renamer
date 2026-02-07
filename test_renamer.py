@@ -395,6 +395,72 @@ class TestCollectionNameNormalization(unittest.TestCase):
     def test_strip_collection_designator_parenthetical(self):
         self.assertEqual(renamer.strip_collection_designator('Foo (Collection)'), 'Foo')
 
+    def test_strip_collection_designator_fullwidth_cjk(self):
+        self.assertEqual(renamer.strip_collection_designator('熊猫计划（系列）'), '熊猫计划')
+
+
+class TestCollectionLocalizationDebug(unittest.TestCase):
+
+    def setUp(self):
+        renamer._COLLECTION_NAME_CACHE.clear()
+
+    @patch('renamer._make_tmdb_request')
+    def test_collection_name_kept_when_region_specific_translation_missing(self, mock_request):
+        tmdb_data = {
+            'belongs_to_collection': {
+                'id': 1421776,
+                'name': '熊猫计划（系列）',
+            }
+        }
+
+        mock_request.return_value = {
+            'translations': [
+                {
+                    'iso_639_1': 'es',
+                    'iso_3166_1': 'MX',
+                    'data': {'name': 'Operación Panda: Colección'},
+                }
+            ]
+        }
+
+        renamer.apply_preferred_collection_name(tmdb_data, {}, 'es', 'ES', debug=False)
+        self.assertEqual(tmdb_data['belongs_to_collection']['name'], '熊猫计划（系列）')
+
+    @patch('renamer._make_tmdb_request')
+    def test_collection_debug_shows_language_breakdown(self, mock_request):
+        tmdb_data = {
+            'belongs_to_collection': {
+                'id': 1421776,
+                'name': 'Panda Plan Collection',
+            }
+        }
+
+        mock_request.return_value = {
+            'translations': [
+                {
+                    'iso_639_1': 'es',
+                    'iso_3166_1': 'ES',
+                    'data': {'name': 'Panda Plan'},
+                },
+                {
+                    'iso_639_1': 'es',
+                    'iso_3166_1': 'MX',
+                    'data': {'name': 'Operación Panda: Misión rescate'},
+                },
+            ]
+        }
+
+        with patch('renamer.console_logger.info') as mock_info:
+            renamer.apply_preferred_collection_name(tmdb_data, {}, 'es', 'ES', debug=True)
+
+        self.assertEqual(tmdb_data['belongs_to_collection']['name'], 'Panda Plan')
+
+        messages = "\n".join(
+            str(c.args[0]) for c in mock_info.call_args_list if c.args
+        )
+        self.assertIn('TMDB collection translations found for es (requested region=ES)', messages)
+        self.assertIn("TMDB collection es-ES name candidate: 'Panda Plan'.", messages)
+
 
 class TestPathOverlapClassification(unittest.TestCase):
 
