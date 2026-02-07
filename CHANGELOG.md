@@ -2,7 +2,7 @@
 
 This file is written in English to keep diffs simple.
 
-### 1.3
+### 1.2.2
 
 - Keep strict collection localization by language+region: if the exact region translation is missing (e.g. `es-ES`), keep TMDB default collection name and do not fall back to another region.
 - Improve `--debug` console output for collections: show translation breakdown by language/region, exact region candidate, and the final collection-name decision.
