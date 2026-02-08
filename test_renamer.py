@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import Any, Dict, cast
 
 import requests
@@ -11,6 +12,14 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 import renamer  # Import the script we want to test
+
+
+LEGACY_DESTINATION_TEMPLATE = (
+    "{COLLECTION_NAME|fallback:${TITLE}|char:0|upper}/"
+    "{COLLECTION_NAME}/{TITLE} ({YEAR}) {IMDB}/"
+    "{TITLE} ({YEAR}) {IMDB} - "
+    "[{VF}{SOURCE|ifexists: (%value%)}{HDR|ifexists:, %value%}{VC|ifexists:, %value%}{AC|ifexists:, %value%}]"
+)
 
 class TestFilenameSanitization(unittest.TestCase):
 
@@ -24,6 +33,37 @@ class TestFilenameSanitization(unittest.TestCase):
         for c in cases:
             with self.subTest(name=c['name']):
                 self.assertEqual(renamer.sanitize_filename(c['name']), c['expected'])
+
+
+class TestMediaAnalysis(unittest.TestCase):
+
+    def test_detect_hdr_label_prefers_dolby_vision(self):
+        track = SimpleNamespace(
+            hdr_format='Dolby Vision',
+            hdr_format_string=None,
+            hdr_format_commercial=None,
+            hdr_format_compatibility=None,
+            transfer_characteristics=None,
+            transfer_characteristics_original=None,
+            bit_depth='10',
+            colour_primaries='BT.2020',
+            color_primaries=None,
+        )
+        self.assertEqual(renamer._detect_hdr_label(track), 'Dolby Vision')
+
+    def test_detect_hdr_label_not_only_bit_depth(self):
+        track = SimpleNamespace(
+            hdr_format=None,
+            hdr_format_string=None,
+            hdr_format_commercial=None,
+            hdr_format_compatibility=None,
+            transfer_characteristics=None,
+            transfer_characteristics_original=None,
+            bit_depth='10',
+            colour_primaries='BT.709',
+            color_primaries=None,
+        )
+        self.assertEqual(renamer._detect_hdr_label(track), '')
 
 
 class TestMovieNameExtraction(unittest.TestCase):
@@ -557,7 +597,13 @@ class TestPathBuilding(unittest.TestCase):
         }
         media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
         dest_path = renamer.build_destination_path(
-            tmdb_data, media_info, 'BluRay', Path('/movies'), 'en', '.mkv'
+            tmdb_data,
+            media_info,
+            'BluRay',
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template=LEGACY_DESTINATION_TEMPLATE,
         )
         expected = Path('/movies/I/Inception (2010) [tt1375666]/Inception (2010) [tt1375666] - [1080p (BluRay), x264, EAC3].mkv')
         self.assertEqual(dest_path, expected)
@@ -574,11 +620,592 @@ class TestPathBuilding(unittest.TestCase):
         }
         media_info = {'vf': '2160p', 'vc': 'x265', 'ac': 'TrueHD', 'hdr': 'HDR'}
         dest_path = renamer.build_destination_path(
-            tmdb_data, media_info, 'UHD BDRemux', Path('/movies'), 'en', '.mkv'
+            tmdb_data,
+            media_info,
+            'UHD BDRemux',
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template=LEGACY_DESTINATION_TEMPLATE,
         )
         # This test now reflects the intended behavior of having a hyphen separator.
         expected = Path('/movies/H/Harry Potter - Collection/Harry Potter and the Sorcerer\'s Stone (2001) [tt0241527]/Harry Potter and the Sorcerer\'s Stone (2001) [tt0241527] - [2160p (UHD BDRemux), HDR, x265, TrueHD].mkv')
         self.assertEqual(dest_path, expected)
+
+
+class TestDestinationTemplateParameterization(unittest.TestCase):
+
+    def _base_tmdb_data(self) -> Dict[str, Any]:
+        return {
+            'id': 27205,
+            'title': 'Inception',
+            'original_title': 'Inception',
+            'release_date': '2010-07-16',
+            'external_ids': {'imdb_id': 'tt1375666'},
+        }
+
+    def test_custom_template_with_lang_and_region(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+        template = "{LANG}/{REGION}/{YEAR}/{TITLE}/{TITLE} - {VF}"
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            'BluRay',
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template=template,
+            region='US',
+        )
+
+        expected = Path('/movies/en/US/2010/Inception/Inception - 1080p.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_collection_name_tag_is_empty_when_not_in_collection(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+        template = "{COLLECTION_NAME|fallback:${TITLE}|char:0|upper}/{COLLECTION_NAME}/{TITLE} ({YEAR}) {IMDB}/{TITLE} ({YEAR}) {IMDB}"
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template=template,
+        )
+
+        expected = Path('/movies/I/Inception (2010) [tt1375666]/Inception (2010) [tt1375666].mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_first_letter_can_be_computed_with_fallback_expression(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{COLLECTION_NAME|fallback:${TITLE}|char:0|upper}/{TITLE}",
+        )
+
+        expected = Path('/movies/I/Inception.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_unknown_template_tag_raises(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{TITLE}/{UNKNOWN_TAG}/{TITLE}",
+            )
+
+    def test_name_alias_is_rejected(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{NAME}",
+            )
+
+    def test_ext_field_is_rejected(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{TITLE}{EXT}",
+            )
+
+    def test_lowercase_field_and_dot_shorthand_work(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{title[0].upper}/{title.upper}",
+        )
+
+        expected = Path('/movies/I/INCEPTION.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_to_upper_alias_is_rejected(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{title.toUpper}",
+            )
+
+    def test_unknown_template_filter_raises(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{TITLE|explode}",
+            )
+
+    def test_technical_fields_are_fully_composable_without_aggregate(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template=(
+                "{TITLE}/{TITLE} - "
+                "[{VF}, {VC}, {AC}]"
+            ),
+        )
+
+        expected = Path('/movies/Inception/Inception - [1080p, x264, EAC3].mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_ifcontains_rule_filter(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{TITLE}{TITLE|ifcontains:ception: [MATCH]}",
+        )
+
+        expected = Path('/movies/Inception/Inception [MATCH].mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_rule_text_supports_explicit_field_variables(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            'BluRay',
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{SOURCE|ifexists:${TITLE} - %value%:NO}",
+        )
+
+        expected = Path('/movies/Inception/Inception - BluRay.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_rule_text_rejects_legacy_dollar_field_token(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                'BluRay',
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="{TITLE}/{SOURCE|ifexists:$TITLE - %value%}",
+            )
+
+    def test_ifge_rule_filter_for_fps(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None, 'fps': 60.0}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{TITLE} - {FPS|ifge:60:%value%FPS}",
+        )
+
+        expected = Path('/movies/Inception/Inception - 60FPS.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_ifexists_rule_filter(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': 'HDR10'}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{TITLE}{HDR|ifexists: - %value%}",
+        )
+
+        expected = Path('/movies/Inception/Inception - HDR10.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_ifexists_branch_matrix(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        cases = [
+            {
+                'label': 'empty then, source present',
+                'template': "{TITLE}/{TITLE}{SOURCE|ifexists::NOEXISTE}",
+                'source': 'BluRay',
+                'expected': Path('/movies/Inception/Inception.mkv'),
+            },
+            {
+                'label': 'empty then, source missing',
+                'template': "{TITLE}/{TITLE}{SOURCE|ifexists::NOEXISTE}",
+                'source': None,
+                'expected': Path('/movies/Inception/InceptionNOEXISTE.mkv'),
+            },
+            {
+                'label': 'then/else, source present',
+                'template': "{TITLE}/{TITLE}{SOURCE|ifexists:SIEXISTE:NOEXISTE}",
+                'source': 'BluRay',
+                'expected': Path('/movies/Inception/InceptionSIEXISTE.mkv'),
+            },
+            {
+                'label': 'then/else, source missing',
+                'template': "{TITLE}/{TITLE}{SOURCE|ifexists:SIEXISTE:NOEXISTE}",
+                'source': None,
+                'expected': Path('/movies/Inception/InceptionNOEXISTE.mkv'),
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case['label']):
+                result = renamer.build_destination_path(
+                    tmdb_data,
+                    media_info,
+                    case['source'],
+                    Path('/movies'),
+                    'en',
+                    '.mkv',
+                    destination_template=cast(str, case['template']),
+                )
+                self.assertEqual(result, cast(Path, case['expected']))
+
+    def test_fallback_accepts_literal_text(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{COLLECTION_NAME|fallback:No Collection}/{TITLE}",
+        )
+
+        expected = Path('/movies/No Collection/Inception.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_fallback_uses_explicit_variable_marker(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        literal_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{COLLECTION_NAME|fallback:TITLE}/{TITLE}",
+        )
+
+        variable_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{COLLECTION_NAME|fallback:${TITLE}}/{TITLE}",
+        )
+
+        legacy_braced_literal_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{COLLECTION_NAME|fallback:{TITLE}}/{TITLE}",
+        )
+
+        self.assertEqual(literal_path, Path('/movies/TITLE/Inception.mkv'))
+        self.assertEqual(variable_path, Path('/movies/Inception/Inception.mkv'))
+        self.assertEqual(legacy_braced_literal_path, Path('/movies/{TITLE}/Inception.mkv'))
+
+    def test_template_dot_segments_are_rejected(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        with self.assertRaises(ValueError):
+            renamer.build_destination_path(
+                tmdb_data,
+                media_info,
+                None,
+                Path('/movies'),
+                'en',
+                '.mkv',
+                destination_template="../{TITLE}",
+            )
+
+    def test_literals_between_tags_are_rendered(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/holi - {YEAR} - literal",
+        )
+
+        expected = Path('/movies/Inception/holi - 2010 - literal.mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_local_filename_field_is_exposed_for_rules(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{LOCAL_FILENAME|ifcontains:WEB-DL:[LOCAL]}",
+            local_filename='Inception.2010.WEB-DL.x264.mkv',
+        )
+
+        expected = Path('/movies/Inception/[LOCAL].mkv')
+        self.assertEqual(dest_path, expected)
+
+    def test_stem_filter_derives_local_filename_basename(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template="{TITLE}/{LOCAL_FILENAME|stem}",
+            local_filename='Inception.2010.WEB-DL.x264.mkv',
+        )
+
+        expected = Path('/movies/Inception/Inception.2010.WEB-DL.x264.mkv')
+        self.assertEqual(dest_path, expected)
+
+
+class TestTemplatePresets(unittest.TestCase):
+
+    def _base_tmdb_data(self) -> Dict[str, Any]:
+        return {
+            'id': 27205,
+            'title': 'Inception',
+            'original_title': 'Inception',
+            'release_date': '2010-07-16',
+            'external_ids': {'imdb_id': 'tt1375666'},
+        }
+
+    def test_resolve_known_preset(self):
+        resolved = renamer.resolve_destination_template('preset:plex')
+        self.assertEqual(resolved, renamer.TEMPLATE_PRESETS['plex'])
+
+    def test_resolve_known_preset_short_name(self):
+        resolved = renamer.resolve_destination_template('plex')
+        self.assertEqual(resolved, renamer.TEMPLATE_PRESETS['plex'])
+
+    def test_unknown_preset_raises(self):
+        with self.assertRaises(ValueError):
+            renamer.resolve_destination_template('preset:not_exists')
+
+    def test_build_path_with_movie_year_presets(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        cases = [
+            ('preset:plex', Path('/movies/Inception (2010)/Inception (2010).mkv')),
+            ('preset:emby', Path('/movies/Inception (2010)/Inception (2010).mkv')),
+        ]
+
+        for preset, expected in cases:
+            with self.subTest(preset=preset):
+                dest_path = renamer.build_destination_path(
+                    tmdb_data,
+                    media_info,
+                    None,
+                    Path('/movies'),
+                    'en',
+                    '.mkv',
+                    destination_template=preset,
+                )
+                self.assertEqual(dest_path, expected)
+
+    def test_build_path_with_jellyfin_preset_uses_doc_id_shape(self):
+        tmdb_data = self._base_tmdb_data()
+        media_info = {'vf': '1080p', 'vc': 'x264', 'ac': 'EAC3', 'hdr': None}
+
+        dest_path = renamer.build_destination_path(
+            tmdb_data,
+            media_info,
+            None,
+            Path('/movies'),
+            'en',
+            '.mkv',
+            destination_template='preset:jellyfin',
+        )
+
+        expected = Path('/movies/Inception (2010) [imdbid-tt1375666]/Inception (2010) [imdbid-tt1375666].mkv')
+        self.assertEqual(dest_path, expected)
+
+class TestConfigurationLoading(unittest.TestCase):
+
+    def test_setup_configuration_accepts_rule_variables(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src = root / 'src'
+            dest = root / 'dest'
+            src.mkdir()
+            dest.mkdir()
+
+            config_path = root / 'config.ini'
+            config_path.write_text(
+                (
+                    "[TMDB]\n"
+                    "api_key = dummy-token\n\n"
+                    "[TEMPLATES]\n"
+                    "destination_template = {COLLECTION_NAME|fallback:${TITLE}}/{SOURCE|ifexists: (%value%)}\n"
+                ),
+                encoding='utf-8',
+            )
+
+            fake_script_path = root / 'renamer.py'
+            fake_script_path.write_text('', encoding='utf-8')
+
+            argv = [
+                'renamer.py',
+                '--src',
+                str(src),
+                '--dest',
+                str(dest),
+                '--action',
+                'test',
+                '--lang',
+                'es',
+            ]
+
+            with patch.object(renamer, '__file__', str(fake_script_path)):
+                with patch.object(sys, 'argv', argv):
+                    cfg = renamer.setup_configuration()
+
+            self.assertIsNotNone(cfg)
+            cfg = cast(Dict[str, Any], cfg)
+            self.assertEqual(cfg['destination_template'], '{COLLECTION_NAME|fallback:${TITLE}}/{SOURCE|ifexists: (%value%)}')
+
+    def test_setup_configuration_rejects_value_as_dollar_variable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src = root / 'src'
+            dest = root / 'dest'
+            src.mkdir()
+            dest.mkdir()
+
+            config_path = root / 'config.ini'
+            config_path.write_text(
+                (
+                    "[TMDB]\n"
+                    "api_key = dummy-token\n\n"
+                    "[TEMPLATES]\n"
+                    "destination_template = {TITLE}/{SOURCE|ifexists: (${VALUE})}\n"
+                ),
+                encoding='utf-8',
+            )
+
+            fake_script_path = root / 'renamer.py'
+            fake_script_path.write_text('', encoding='utf-8')
+
+            argv = [
+                'renamer.py',
+                '--src',
+                str(src),
+                '--dest',
+                str(dest),
+                '--action',
+                'test',
+                '--lang',
+                'es',
+            ]
+
+            with patch.object(renamer, '__file__', str(fake_script_path)):
+                with patch.object(sys, 'argv', argv):
+                    cfg = renamer.setup_configuration()
+
+            self.assertIsNone(cfg)
 
 
 
