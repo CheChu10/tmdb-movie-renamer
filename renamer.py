@@ -194,19 +194,23 @@ ALLOWED_TEMPLATE_FIELDS = set(TEMPLATE_TAG_DESCRIPTIONS)
 # the correct suffix for the chosen language to keep folder names consistent.
 _COLLECTION_DESIGNATOR_PATTERNS = [
     r'collection',
+    r'series',
     r'colecci[oó]n',
     r'sammlung',
     r'collezione',
     r'cole[cç][aã]o',
+    r'系列',
+    r'シリーズ',
+    r'시리즈',
 ]
 _COLLECTION_ARTICLE_PATTERN = r"(?:the|a|an|la|el|los|las|le|les|il|lo|i|gli|die|der|das|o|os|as)"
 _COLLECTION_DESIGNATOR_RE_PART = r'(?:' + '|'.join(_COLLECTION_DESIGNATOR_PATTERNS) + r')'
 _COLLECTION_SUFFIX_STRIP_RE = re.compile(
-    r"(?:\s*[-–—:]+\s*|\s+)(?:" + _COLLECTION_ARTICLE_PATTERN + r"\s+)?" + _COLLECTION_DESIGNATOR_RE_PART + r"\s*$",
+    r"(?:\s*[-–—:：]+\s*|\s+)(?:" + _COLLECTION_ARTICLE_PATTERN + r"\s+)?" + _COLLECTION_DESIGNATOR_RE_PART + r"\s*$",
     flags=re.IGNORECASE,
 )
 _COLLECTION_SUFFIX_PARENS_STRIP_RE = re.compile(
-    r"\s*[\(\[]\s*(?:" + _COLLECTION_ARTICLE_PATTERN + r"\s+)?" + _COLLECTION_DESIGNATOR_RE_PART + r"\s*[\)\]]\s*$",
+    r"\s*[\(\[（【]\s*(?:" + _COLLECTION_ARTICLE_PATTERN + r"\s+)?" + _COLLECTION_DESIGNATOR_RE_PART + r"\s*[\)\]）】]\s*$",
     flags=re.IGNORECASE,
 )
 
@@ -672,6 +676,11 @@ def _pick_collection_name_from_translations(
     return None
 
 
+def _extract_collection_translation_name(tr: Dict[str, Any]) -> str:
+    data = tr.get('data') or {}
+    return (data.get('name') or data.get('title') or tr.get('name') or '').strip()
+
+
 def apply_preferred_collection_name(
     tmdb_data: Dict[str, Any],
     headers: Dict[str, str],
@@ -701,8 +710,19 @@ def apply_preferred_collection_name(
     cache_key = (collection_id, lang_code, region)
     if cache_key in _COLLECTION_NAME_CACHE:
         chosen = _COLLECTION_NAME_CACHE[cache_key]
+        old_name = (collection.get('name') or '').strip()
         if chosen:
             collection['name'] = chosen
+            if debug:
+                console_logger.info(
+                    Fore.CYAN
+                    + f"[DEBUG] Using cached localized collection name '{chosen}' (was: '{old_name or 'N/A'}')."
+                )
+        elif debug:
+            console_logger.info(
+                Fore.CYAN
+                + f"[DEBUG] No cached localized collection name found; keeping TMDB collection name as-is: '{old_name or 'N/A'}'."
+            )
         return
 
     url = f"https://api.themoviedb.org/3/collection/{collection_id}/translations"
@@ -728,6 +748,45 @@ def apply_preferred_collection_name(
     if not isinstance(translations, list):
         translations = (resp.get('translations', {}) or {}).get('translations')
 
+    if debug:
+        if isinstance(translations, list):
+            entries: List[str] = []
+            exact_region_name = None
+
+            for tr in translations:
+                if tr.get('iso_639_1') != lang_code:
+                    continue
+
+                name = _extract_collection_translation_name(tr)
+                if not name:
+                    continue
+
+                iso3166 = tr.get('iso_3166_1')
+                if region and iso3166 == region and exact_region_name is None:
+                    exact_region_name = name
+
+                entries.append(f"{iso3166}:{name}" if iso3166 else name)
+
+            if entries:
+                suffix = f" for {lang_code}" + (f" (requested region={region})" if region else "")
+                console_logger.info(Fore.CYAN + f"[DEBUG] TMDB collection translations found{suffix}: " + "; ".join(entries[:10]))
+                if len(entries) > 10:
+                    console_logger.info(Fore.CYAN + f"[DEBUG] TMDB collection translations truncated: total={len(entries)}")
+
+                if region:
+                    if exact_region_name:
+                        console_logger.info(
+                            Fore.CYAN + f"[DEBUG] TMDB collection {lang_code}-{region} name candidate: '{exact_region_name}'."
+                        )
+                    else:
+                        console_logger.info(Fore.CYAN + f"[DEBUG] TMDB collection {lang_code}-{region} name candidate: (none).")
+            else:
+                console_logger.info(
+                    Fore.CYAN + f"[DEBUG] TMDB collection translations: no entries for iso_639_1='{lang_code}'."
+                )
+        else:
+            console_logger.info(Fore.CYAN + "[DEBUG] TMDB collection translations payload missing or invalid.")
+
     chosen = _pick_collection_name_from_translations(translations, lang_code, region, strict_region=strict_region)
     chosen = (chosen or '').strip() or None
 
@@ -741,6 +800,12 @@ def apply_preferred_collection_name(
                 Fore.CYAN
                 + f"[DEBUG] Using '{chosen}' as collection name (was: '{old_name or 'N/A'}')."
             )
+    elif debug:
+        old_name = (collection.get('name') or '').strip()
+        console_logger.info(
+            Fore.CYAN
+            + f"[DEBUG] No localized collection name applied; keeping TMDB collection name as-is: '{old_name or 'N/A'}'."
+        )
 
     # Log a summary to the detailed log for diagnosability.
     if isinstance(translations, list):
@@ -751,8 +816,7 @@ def apply_preferred_collection_name(
             try:
                 iso639 = tr.get('iso_639_1')
                 iso3166 = tr.get('iso_3166_1')
-                data = tr.get('data') or {}
-                name = (data.get('name') or data.get('title') or tr.get('name') or '').strip()
+                name = _extract_collection_translation_name(tr)
                 if name:
                     detail_logger.debug(f"TMDB collection translation entry: {iso639}-{iso3166} name={name}")
             except Exception:
