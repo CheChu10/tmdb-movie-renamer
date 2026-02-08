@@ -2,6 +2,34 @@
 
 This file is written in English to keep diffs simple.
 
+### 2.0
+
+- Add mandatory destination template configuration via `[TEMPLATES].destination_template` and preset resolution (`preset:jellyfin|plex|emby|minimal`).
+- Align built-in `jellyfin`, `plex`, and `emby` presets with their official naming documentation conventions.
+- Keep `config.example.ini` using the project's existing custom Jellyfin-compatible layout as the default example.
+- Extract architecture into dedicated modules: `template_engine.py`, `template_presets.py`, and `media_analysis.py`; keep `renamer.py` as CLI/orchestration.
+- Introduce validated template fields and lightweight transformations/rules (`upper/lower/title`, `char`, `slice`, `fallback`, `ifcontains`, `ifexists`, `ifge`, etc.), including shorthand like `title[0].upper`.
+- Clarify fallback semantics: `fallback:...` is literal by default, and variable fallback now requires explicit `${FIELD}`.
+- Standardize rule placeholders to `%value%` for current conditional value and `${FIELD}` for explicit field references inside rule text.
+- Reject ambiguous/legacy rule tokens (`${VALUE}` and `$FIELD`) to keep template semantics explicit.
+- Disable ConfigParser interpolation for templates so `%` literals are read safely from `config.ini`.
+- Add local-input filename field (`LOCAL_FILENAME`) to clearly distinguish local filename context from TMDB title fields.
+- Add `stem` filter so templates can derive basename from `LOCAL_FILENAME` when needed.
+- Simplify shorthand filter style to canonical names (`upper/lower/title`) and remove `toUpper`-style aliases.
+- Simplify field model by removing redundant aliases/legacy placeholders in favor of explicit primitives (`TITLE`, `COLLECTION_NAME`, `IMDB`, etc.).
+- Enforce safer rendering by rejecting unknown fields/filters and unsafe dot-segments (`../`, `./`).
+- Improve HDR detection from MediaInfo analysis (Dolby Vision/HDR10/HLG signals) and expose additional media-analysis fields (`FPS`, `BIT_DEPTH`).
+- Add preset-focused and rule-focused unit tests (preset resolution/use, conditional rules, fallback literals) while preserving existing behavior tests.
+- Update docs/config examples for presets, rule engine syntax, module layout, and operational guidance.
+
+### 1.2.2
+
+- Keep strict collection localization by language+region: if the exact region translation is missing (e.g. `es-ES`), keep TMDB default collection name and do not fall back to another region.
+- Improve `--debug` console output for collections: show translation breakdown by language/region, exact region candidate, and the final collection-name decision.
+- Add `--debug` trace for collection folder assembly (raw TMDB name, normalized/base name, suffix, final folder, index letter).
+- Expand collection suffix normalization for extra designators, including CJK forms like `（系列）`, `シリーズ`, and `시리즈`.
+- Add tests for CJK collection suffix stripping and strict region behavior/debug diagnostics in collection localization.
+
 ### 1.2.1
 
 - Fix filename sanitization for time-like titles (e.g. `15:17` -> `15.17`).

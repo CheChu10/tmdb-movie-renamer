@@ -47,7 +47,22 @@ else:
     MSVCRT_UNLOCK = None
 
 from colorama import Fore, Style, init
-from pymediainfo import MediaInfo
+
+from media_analysis import (
+    deduce_source_from_media_info,
+    detect_hdr_label as _detect_hdr_label,
+    extract_media_info,
+    format_float_compact as _format_float_compact,
+    get_resolution_class as _media_get_resolution_class,
+    to_float as _to_float,
+    to_int as _to_int,
+)
+from template_engine import TEMPLATE_FILTER_DESCRIPTIONS, render_template, validate_template
+from template_presets import (
+    TEMPLATE_PRESETS,
+    available_template_preset_names,
+    resolve_destination_template,
+)
 
 
 # --- Constants ---
@@ -146,6 +161,32 @@ _MIN_PLAUSIBLE_YEAR = 1888
 _MAX_PLAUSIBLE_YEAR_SKEW = 1  # allow next-year releases
 _PARENS_YEAR_CAPTURE_RE = re.compile(r'\(\s*(\d{4})\s*\)')
 _PARENS_YEAR_FULL_RE = re.compile(r'^\(\s*(\d{4})\s*\)$')
+
+# Inspired by field-based formatters (FileBot style), but deterministic:
+# placeholders are explicit and validated; unknown fields/filters are rejected.
+TEMPLATE_TAG_DESCRIPTIONS: Dict[str, str] = {
+    'TITLE': 'Title selected from TMDB, sanitized for filesystem.',
+    'ORIGINAL_TITLE': 'Original title from TMDB, sanitized for filesystem.',
+    'LOCAL_FILENAME': 'Original local filename including extension (raw input name).',
+    'YEAR': 'Release year derived from TMDB release_date.',
+    'RELEASE_DATE': 'TMDB release_date (YYYY-MM-DD when available).',
+    'TMDB_ID': 'TMDB movie id.',
+    'COLLECTION_ID': 'TMDB collection id when available.',
+    'COLLECTION_NAME': 'Final normalized collection name.',
+    'IMDB_ID': 'IMDb id without brackets (ttXXXXXXX).',
+    'IMDB': 'IMDb id wrapped as [ttXXXXXXX], empty when unavailable.',
+    'VF': 'Video format/resolution tag.',
+    'SOURCE': 'Detected source (WEB-DL, BluRay, BDRemux, etc).',
+    'HDR': 'HDR label detected from media analysis (not filename heuristics).',
+    'FPS': 'Frame rate from media analysis.',
+    'BIT_DEPTH': 'Bit depth from media analysis.',
+    'VC': 'Video codec tag.',
+    'AC': 'Audio codec tag.',
+    'LANG': 'Normalized language code used for TMDB.',
+    'REGION': 'Normalized region code used for TMDB, empty when not set.',
+}
+
+ALLOWED_TEMPLATE_FIELDS = set(TEMPLATE_TAG_DESCRIPTIONS)
 
 # Collection suffix normalization
 # TMDB collection names often include a localized "collection" suffix already
@@ -1040,68 +1081,28 @@ def get_tmdb_info(api_key: str, filename: str, lang_code: str, region: Optional[
 
 
 def get_resolution_class(width: Optional[int], height: Optional[int]) -> str:
-    """Classifies video resolution using both width and height with tolerance.
-    Fixes cases like 1792x1080 (should be 1080p) and 3840x1600 (should be 2160p).
-    """
-    if not width or not height:
-        return "N/A"
-
-    w, h = int(width), int(height)
-
-    # Tolerancia (~5%) para encodes no estándar, anamórficos o con recortes.
-    # Con esto: h≈1080 => 1080p aunque w<1920 (p.ej., 1792x1080).
-    for w_th, h_th, label in RESOLUTION_CLASS_TIERS:
-        if w >= int(w_th * RESOLUTION_TOLERANCE) or h >= int(h_th * RESOLUTION_TOLERANCE):
-            return label
-
-    return f"{h}p"
+    """Classify video resolution using width/height with tolerance."""
+    return _media_get_resolution_class(
+        width,
+        height,
+        resolution_tolerance=RESOLUTION_TOLERANCE,
+        resolution_class_tiers=RESOLUTION_CLASS_TIERS,
+    )
 
 
 def get_media_info(filepath: Path, debug: bool = False) -> Optional[Dict[str, Any]]:
-    """Extracts technical media information from a file."""
+    """Extract technical media information from a file."""
     try:
-        media_info = MediaInfo.parse(filepath)
-
-        if not media_info.video_tracks:
-            file_logger.warning(f"No video track found in '{filepath}'")
-            return None
-
-        if not media_info.audio_tracks:
-            file_logger.warning(f"No audio track found in '{filepath}'")
-            return None
-
-        if not media_info.general_tracks:
-            file_logger.warning(f"No general track found in '{filepath}'")
-            return None
-
-        video_track = media_info.video_tracks[0]
-        audio_track = media_info.audio_tracks[0]
-        general_track = media_info.general_tracks[0]
-
+        info = extract_media_info(filepath, get_resolution_class)
         if debug:
-            console_logger.info(Fore.CYAN + f"[DEBUG] Raw video track info:")
-            console_logger.info(Fore.CYAN + f"        - Format: {video_track.format}")
-            console_logger.info(Fore.CYAN + f"        - Width: {video_track.width}")
-            console_logger.info(Fore.CYAN + f"        - Height: {video_track.height}")
-            console_logger.info(Fore.CYAN + f"        - Writing library: {getattr(video_track, 'writing_library', 'N/A')}")
-
-        writing_library = video_track.writing_library
-        if writing_library and 'x264' in writing_library.lower():
-            vc = 'x264'
-        elif writing_library and 'x265' in writing_library.lower():
-            vc = 'x265'
-        else:
-            vc = (video_track.format or "N/A").upper()
-
-        return {
-            'vf': get_resolution_class(video_track.width, video_track.height),
-            'vc': vc,
-            'ac': (audio_track.format or "N/A").replace('-', ''),
-            'hdr': "HDR" if video_track.bit_depth and int(video_track.bit_depth) >= 10 else None,
-            'width': video_track.width,
-            'height': video_track.height,
-            'bitrate': general_track.overall_bit_rate,
-        }
+            console_logger.info(Fore.CYAN + "[DEBUG] Media analysis extracted:")
+            console_logger.info(Fore.CYAN + f"        - Resolution: {info.get('vf')}")
+            console_logger.info(Fore.CYAN + f"        - Video codec: {info.get('vc')}")
+            console_logger.info(Fore.CYAN + f"        - Audio codec: {info.get('ac')}")
+            console_logger.info(Fore.CYAN + f"        - HDR: {info.get('hdr') or 'N/A'}")
+            console_logger.info(Fore.CYAN + f"        - FPS: {info.get('fps') if info.get('fps') is not None else 'N/A'}")
+            console_logger.info(Fore.CYAN + f"        - Bit depth: {info.get('bit_depth') or 'N/A'}")
+        return info
     except Exception as e:
         file_logger.warning(f"Could not read media info from '{filepath}': {e}")
         return None
@@ -1122,64 +1123,199 @@ def deduce_source_from_mediainfo(media_info: Dict[str, Any], debug: bool = False
     """Attempts to deduce the source based on resolution and bitrate."""
     height = media_info.get('height')
     bitrate = media_info.get('bitrate')
-    if not height or not bitrate:
-        return None
-
-    bitrate_mbps = bitrate / 1_000_000
-    if debug:
+    if debug and height and bitrate:
+        bitrate_mbps = bitrate / 1_000_000
         console_logger.info(Fore.CYAN + f"[DEBUG] Deducing source: Height={height}p, Bitrate={bitrate_mbps:.2f} Mbps")
 
-    source = DEFAULT_DEDUCED_SOURCE
-    if height >= UHD_HEIGHT_THRESHOLD and bitrate_mbps > UHD_BDREMUX_BITRATE_MBPS:
-        source = 'UHD BDRemux'
-    elif height >= UHD_HEIGHT_THRESHOLD:
-        source = 'UHDRip'
-    elif height >= 1080 and bitrate_mbps > BDREMUX_BITRATE_MBPS:
-        source = 'BDRemux'
-    elif height >= 1080 and bitrate_mbps > BDRIP_BITRATE_MBPS:
-        source = 'BDRip'
+    source = deduce_source_from_media_info(
+        media_info,
+        default_source=DEFAULT_DEDUCED_SOURCE,
+        uhd_height_threshold=UHD_HEIGHT_THRESHOLD,
+        uhd_bdremux_bitrate_mbps=UHD_BDREMUX_BITRATE_MBPS,
+        bdremux_bitrate_mbps=BDREMUX_BITRATE_MBPS,
+        bdrip_bitrate_mbps=BDRIP_BITRATE_MBPS,
+    )
 
-    if debug:
+    if debug and source:
         console_logger.info(Fore.CYAN + f"[DEBUG] Deduced source: {source}")
     return source
 
 
-def build_destination_path(tmdb_data: Dict[str, Any], media_info: Dict[str, Any], source: Optional[str],
-                           output_dir: Path, lang_code: str, original_suffix: str) -> Path:
-    """Constructs the full destination path for a movie file."""
-    sanitized_title = sanitize_filename(tmdb_data['title'])
-    year = tmdb_data.get('release_date', 'N/A')[:4]
-    imdb_id = tmdb_data.get('external_ids', {}).get('imdb_id', '')
+def validate_destination_template(template: str) -> None:
+    validate_template(template, ALLOWED_TEMPLATE_FIELDS)
 
-    imdb_id_str = f"[{imdb_id}]" if imdb_id else ""
-    movie_title_year = f"{sanitized_title} ({year})"
-    first_letter = sanitized_title[0].upper()
-    movie_folder_parent = output_dir / first_letter
+
+def _render_template_string(template: str, values: Dict[str, str]) -> str:
+    return render_template(template, values, ALLOWED_TEMPLATE_FIELDS)
+
+
+def _normalize_rendered_relative_path(rendered_template: str) -> Path:
+    normalized = (rendered_template or '').replace('\\', '/').strip()
+    if not normalized:
+        raise ValueError('Destination template rendered an empty path.')
+
+    parts: List[str] = []
+    for raw_part in normalized.split('/'):
+        compact = re.sub(r'\s+', ' ', raw_part.strip())
+        if not compact:
+            continue
+        if compact in {'.', '..'}:
+            raise ValueError('Destination template must not contain dot segments (./ or ../).')
+
+        sanitized = sanitize_filename(compact)
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+        if not sanitized:
+            continue
+        if sanitized in {'.', '..'}:
+            raise ValueError('Destination template resolved to an unsafe dot segment.')
+
+        parts.append(sanitized)
+
+    if not parts:
+        raise ValueError('Destination template rendered an empty path.')
+
+    return Path(*parts)
+
+
+def _build_destination_template_values(
+    tmdb_data: Dict[str, Any],
+    media_info: Dict[str, Any],
+    source: Optional[str],
+    lang_code: str,
+    region: Optional[str],
+    local_filename: Optional[str] = None,
+    debug: bool = False,
+) -> Dict[str, str]:
+    title = sanitize_filename((tmdb_data.get('title') or 'Unknown').strip() or 'Unknown')
+    original_title = sanitize_filename((tmdb_data.get('original_title') or '').strip())
+
+    release_date = (tmdb_data.get('release_date') or 'N/A').strip() or 'N/A'
+    year = release_date[:4]
+    tmdb_id = str(tmdb_data.get('id') or '')
+
+    external_ids = tmdb_data.get('external_ids') or {}
+    imdb_id = (external_ids.get('imdb_id') or '').strip()
+    imdb = f"[{imdb_id}]" if imdb_id else ''
+
+    collection_id = ''
+    collection_name = ''
 
     collection_info = tmdb_data.get('belongs_to_collection')
-    if collection_info:
-        collection_name_from_tmdb = sanitize_filename(collection_info['name'])
+    if isinstance(collection_info, dict):
+        collection_id = str(collection_info.get('id') or '')
+        raw_collection_name = (collection_info.get('name') or '').strip()
+        collection_name_from_tmdb = sanitize_filename(raw_collection_name)
         collection_name_base = strip_collection_designator(collection_name_from_tmdb)
-        correct_suffix = get_collection_suffix(lang_code)
-        collection_name = f"{collection_name_base}{correct_suffix}"
-        first_letter = collection_name_base[0].upper()
-        movie_folder_parent = output_dir / first_letter / collection_name
+        collection_suffix = get_collection_suffix(lang_code)
 
-    movie_folder = movie_folder_parent / f"{movie_title_year} {imdb_id_str}".strip()
+        if collection_name_base:
+            collection_name = f"{collection_name_base}{collection_suffix}"
+        elif collection_name_from_tmdb:
+            collection_name = collection_name_from_tmdb
 
-    source_str = f" ({source})" if source else ""
-    tags: List[str] = [f"{media_info.get('vf', 'N/A')}{source_str}"]
-    if media_info.get('hdr'):
-        tags.append(media_info['hdr'])
-    if media_info.get('vc'):
-        tags.append(media_info['vc'])
-    if media_info.get('ac'):
-        tags.append(media_info['ac'])
+        if debug:
+            console_logger.info(
+                Fore.CYAN
+                + "[DEBUG] Collection folder assembly: "
+                + f"raw='{raw_collection_name or 'N/A'}', "
+                + f"normalized='{collection_name_from_tmdb}', "
+                + f"base='{collection_name_base}', "
+                + f"suffix='{collection_suffix}', "
+                + f"folder='{collection_name}'."
+            )
 
-    tags_str = ", ".join(filter(None, tags))
-    new_filename = f"{movie_title_year} {imdb_id_str} - [{tags_str}]{original_suffix}".strip()
+    vf = str(media_info.get('vf') or 'N/A')
+    hdr = str(media_info.get('hdr') or '').strip()
+    fps_value = _to_float(media_info.get('fps'))
+    fps = _format_float_compact(fps_value)
+    bit_depth = str(_to_int(media_info.get('bit_depth')) or '').strip()
+    vc = str(media_info.get('vc') or '').strip()
+    ac = str(media_info.get('ac') or '').strip()
 
-    return movie_folder / new_filename
+    return {
+        'TITLE': title,
+        'ORIGINAL_TITLE': original_title,
+        'LOCAL_FILENAME': str(local_filename or ''),
+        'YEAR': year,
+        'RELEASE_DATE': release_date,
+        'TMDB_ID': tmdb_id,
+        'COLLECTION_ID': collection_id,
+        'COLLECTION_NAME': collection_name,
+        'IMDB_ID': imdb_id,
+        'IMDB': imdb,
+        'VF': vf,
+        'SOURCE': source or '',
+        'HDR': hdr,
+        'FPS': fps,
+        'BIT_DEPTH': bit_depth,
+        'VC': vc,
+        'AC': ac,
+        'LANG': lang_code,
+        'REGION': region or '',
+    }
+
+
+def build_destination_path(
+    tmdb_data: Dict[str, Any],
+    media_info: Dict[str, Any],
+    source: Optional[str],
+    output_dir: Path,
+    lang_code: str,
+    original_suffix: str,
+    destination_template: str,
+    debug: bool = False,
+    region: Optional[str] = None,
+    local_filename: Optional[str] = None,
+) -> Path:
+    """Construct the full destination path for a movie file from template tags."""
+    resolved_template = resolve_destination_template(destination_template)
+    validate_destination_template(resolved_template)
+
+    values = _build_destination_template_values(
+        tmdb_data,
+        media_info,
+        source,
+        lang_code,
+        region,
+        local_filename=local_filename,
+        debug=debug,
+    )
+
+    rendered_relative = _render_template_string(resolved_template, values)
+    relative_path = _normalize_rendered_relative_path(rendered_relative)
+
+    # The template controls folders + base filename only.
+    # Extension is always taken from the source file and appended at the end.
+    suffix = (original_suffix or '').strip()
+    if suffix:
+        filename = relative_path.name
+        if not filename.lower().endswith(suffix.lower()):
+            relative_path = relative_path.with_name(f"{filename}{suffix}")
+
+    destination_path = output_dir / relative_path
+
+    try:
+        output_resolved = output_dir.resolve()
+        destination_resolved = destination_path.resolve()
+        if destination_resolved != output_resolved and output_resolved not in destination_resolved.parents:
+            raise ValueError('Destination template resolved outside --dest directory.')
+    except ValueError:
+        raise
+    except Exception:
+        # Non-fatal fallback for platforms where resolve may fail unexpectedly.
+        pass
+
+    if debug:
+        console_logger.info(
+            Fore.CYAN
+            + "[DEBUG] Destination template render: "
+            + f"template='{destination_template}', "
+            + f"resolved='{resolved_template}', "
+            + f"rendered='{rendered_relative}', "
+            + f"relative='{relative_path}'."
+        )
+
+    return destination_path
 
 
 def classify_path_overlap(src: Path, dest: Path) -> str:
@@ -1335,9 +1471,24 @@ def process_file(filepath: Path, config: Dict[str, Any]) -> None:
 
     source = parse_source_from_filename(filepath.name) or deduce_source_from_mediainfo(media_info, config['debug'])
 
-    destination_path = build_destination_path(
-        tmdb_data, media_info, source, config['output_dir'], config['lang_code'], filepath.suffix
-    )
+    try:
+        destination_path = build_destination_path(
+            tmdb_data,
+            media_info,
+            source,
+            config['output_dir'],
+            config['lang_code'],
+            filepath.suffix,
+            debug=config['debug'],
+            destination_template=config['destination_template'],
+            region=config.get('region'),
+            local_filename=filepath.name,
+        )
+    except ValueError as e:
+        error_prefix = f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL}"
+        console_logger.error(f"{error_prefix} Invalid destination template: {e}")
+        file_logger.error(f"[ERROR] Invalid destination template while processing '{filepath}': {e}")
+        return
 
     action = config['action']
     if destination_path.exists():
@@ -1376,7 +1527,8 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
     parser.add_argument('--debug', action='store_true', help="Enables detailed internal debugging output.")
     args = parser.parse_args()
 
-    config_parser = configparser.ConfigParser()
+    # Disable '%' interpolation: templates may contain '%' literals.
+    config_parser = configparser.ConfigParser(interpolation=None)
     config_path = Path(__file__).parent / 'config.ini'
     if not config_path.exists():
         console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Configuration file '{config_path}' not found.")
@@ -1386,6 +1538,37 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
     api_key = config_parser.get('TMDB', 'api_key', fallback=None)
     if not api_key or api_key == 'TU_API_KEY_AQUI':
         console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Please set your TMDB API key in 'config.ini'.")
+        return None
+
+    if not config_parser.has_section('TEMPLATES') or not config_parser.has_option('TEMPLATES', 'destination_template'):
+        console_logger.error(
+            f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} "
+            "Missing required [TEMPLATES].destination_template in 'config.ini'."
+        )
+        return None
+
+    destination_template_raw = config_parser.get('TEMPLATES', 'destination_template').strip()
+    if not destination_template_raw:
+        console_logger.error(
+            f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} "
+            "'destination_template' in [TEMPLATES] cannot be empty."
+        )
+        return None
+
+    try:
+        destination_template = resolve_destination_template(destination_template_raw)
+    except ValueError as e:
+        presets = ', '.join(available_template_preset_names())
+        console_logger.error(
+            f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} "
+            f"Invalid destination template preset: {e}. Available presets: {presets}"
+        )
+        return None
+
+    try:
+        validate_destination_template(destination_template)
+    except ValueError as e:
+        console_logger.error(f"{COLOR_MAP['ERROR']}[ERROR]{Style.RESET_ALL} Invalid destination template: {e}")
         return None
 
     expanded_src = _expand_src_inputs(args.src)
@@ -1433,12 +1616,26 @@ def setup_configuration() -> Optional[Dict[str, Any]]:
 
     lang_code, region = normalize_lang_input(args.lang)
 
+    if args.debug:
+        console_logger.info(
+            Fore.CYAN
+            + "[DEBUG] Destination template loaded from config: "
+            + destination_template_raw
+        )
+        if destination_template_raw != destination_template:
+            console_logger.info(
+                Fore.CYAN
+                + "[DEBUG] Destination template resolved preset to: "
+                + destination_template
+            )
+
     return {
         'api_key': api_key,
         'input_paths': input_paths,
         'output_dir': args.dest,
         'lang_code': lang_code,
         'region': region,
+        'destination_template': destination_template,
         'action': 'test' if args.dry_run else args.action,
         'debug': args.debug,
         'scan_snapshot': scan_snapshot,
