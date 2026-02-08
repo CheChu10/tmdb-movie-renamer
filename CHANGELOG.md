@@ -2,6 +2,14 @@
 
 This file is written in English to keep diffs simple.
 
+### 1.2.2
+
+- Keep strict collection localization by language+region: if the exact region translation is missing (e.g. `es-ES`), keep TMDB default collection name and do not fall back to another region.
+- Improve `--debug` console output for collections: show translation breakdown by language/region, exact region candidate, and the final collection-name decision.
+- Add `--debug` trace for collection folder assembly (raw TMDB name, normalized/base name, suffix, final folder, index letter).
+- Expand collection suffix normalization for extra designators, including CJK forms like `（系列）`, `シリーズ`, and `시리즈`.
+- Add tests for CJK collection suffix stripping and strict region behavior/debug diagnostics in collection localization.
+
 ### 1.2.1
 
 - Fix filename sanitization for time-like titles (e.g. `15:17` -> `15.17`).
